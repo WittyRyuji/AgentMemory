@@ -9,6 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    working-directory: MemoryCore
+
 jobs:
   # ── 1. Install dependencies ────────────────────────────────
   install:
@@ -25,8 +29,8 @@ jobs:
         uses: actions/cache@v4
         id: cache-deps
         with:
-          path: node_modules
-          key: deps-${{ runner.os }}-${{ hashFiles('package.json') }}
+          path: MemoryCore/node_modules
+          key: deps-${{ runner.os }}-${{ hashFiles('MemoryCore/package.json') }}
 
       - name: npm install
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -47,8 +51,8 @@ jobs:
       - name: Restore node_modules
         uses: actions/cache@v4
         with:
-          path: node_modules
-          key: deps-${{ runner.os }}-${{ hashFiles('package.json') }}
+          path: MemoryCore/node_modules
+          key: deps-${{ runner.os }}-${{ hashFiles('MemoryCore/package.json') }}
 
       - name: npm pack (dry-run)
         run: npm pack --dry-run
@@ -60,7 +64,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: package-tarball
-          path: "*.tgz"
+          path: "MemoryCore/*.tgz"
           retention-days: 7
 
   # ── 5. Plugin manifest validation ──────────────────────────
@@ -114,6 +118,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: package-tarball
+          path: MemoryCore
 
       - name: Check package size
         run: |
@@ -132,3 +137,23 @@ jobs:
           else
             echo "✅ Size OK"
           fi
+
+  # ── 7. Skill queue isolation guard ─────────────────────────
+  # 强约束：禁止 PR 触碰记忆模块红线文件（state/pipeline-worker/integrations/redis），
+  # 禁止 src/core/skill/** 新增直接 fs import。详见
+  # docs/design/2026-06-16-skill-extract-queue.md
+  isolation:
+    name: Skill Queue Isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要完整历史以便 git diff base..HEAD
+
+      - name: Run isolation guard
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: |
+          git fetch origin "${{ github.base_ref || 'main' }}" --depth=50 || true
+          bash scripts/ci/check-skill-queue-isolation.sh
+

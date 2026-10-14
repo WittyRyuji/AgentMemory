@@ -1,440 +1,452 @@
 # Changelog
 
-本文件记录 `@tencentdb-agent-memory/memory-tencentdb` 插件的所有显著变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/)。
+本文件记录 **TencentDB Agent Memory** 的显著变更，格式遵循
+[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
+[Semantic Versioning](https://semver.org/)。
+
+覆盖仓库全部开源模块：`MemoryCore` / `MemoryPanel` / `MemoryKnowledge` /
+`MemoryProxy` / SDK。
 
 ---
 
-## [Unreleased]
+## [2.0.3-beta.1] — 2026-10-13
 
-### ✨ 新功能
+### 🧩 可插拔决策服务（默认关闭）
 
-- **时区可配置** ([#75](https://github.com/Tencent/TencentDB-Agent-Memory/issues/75) / [#87](https://github.com/Tencent/TencentDB-Agent-Memory/issues/87))：新增顶层 `timezone` 配置项，支持 IANA 时区名（`Asia/Shanghai`、`Europe/Berlin`）和 UTC 偏移串（`+08:00`、`-05:30`）。默认 `"system"`（跟随进程系统时区），升级零感。
-  - **暴露给 LLM 的时间戳**统一为带显式 offset 的 ISO 8601（如 `2026-04-07T11:04:45+08:00`），修复 #87 报告的 UTC/本地时区混用导致 LLM 误算时间差的问题。
-  - **L1 / L2 prompt 顶部**自动插入时区声明，指引 LLM 按正确时区推算"昨天"、"上周"等相对时间。
-  - **L0 JSONL 分片日**和 **cleaner 清理边界**跟随配置时区（默认仍为系统时区）。
-  - 存储层（SQLite / TCVDB）时间戳始终为 UTC instant，**无需数据迁移**。
-  - 统一收敛原有 4 处分散的时间格式化 helper 到 `src/utils/time.ts`，减少代码重复。
-- **关闭推理模型 thinking（`disableThinking`）**：新增 `llm.disableThinking` 与 `offload.disableThinking` 两项配置（均默认 `false`，不改变现有行为），支持多种推理引擎/模型提供商的关闭方式。
-  - 可选策略：`"vllm"` (vLLM/SGLang, `chat_template_kwargs.enable_thinking=false`)、`"deepseek"` (DeepSeek API, 顶层 `enable_thinking=false`)、`"dashscope"` (阿里云 DashScope/Qwen, 顶层 `enable_thinking=false`)、`"openai"` (OpenAI o系列, `reasoning_effort="low"`)、`"anthropic"` (Anthropic Claude, `thinking.type="disabled"`)、`"kimi"` (Kimi/Moonshot, `thinking.type="disabled"`)、`"gemini"` (Google Gemini, `thinking_config.thinking_budget=0`)。
-  - 环境变量 `TDAI_LLM_DISABLE_THINKING` 支持策略名（如 `deepseek`）和布尔值。
-  - 修复 offload local-llm 模式下每次 LLM 调用都重新创建 fetch wrapper 的性能问题（现在在 `LocalLlmClient` 构造函数中创建一次并缓存）。
-  - 注入逻辑抽取到 `src/utils/no-think-fetch.ts` 共享，新增 vitest 单测覆盖全部策略 / 跳过 embedding / 非 JSON 容错。
+- Skill 选择与 Memory L3 更新判定改为通过统一的决策服务接口调用，内置 JEV，
+  可接入其他 decision API；配置用 `provider` 指定（默认 `jev`），旧配置无需修改
+- 默认不调用 JEV，行为与之前一致；开启后决策服务调用失败不影响正常对话与记忆写入
 
-### ⚠️ 升级注意（仅在显式配置 `timezone` 时生效）
+### 🧰 技能（Skill）按需选择（默认关闭）
 
-如果你**显式**设置了 IANA 时区（如 `"Asia/Shanghai"`）：
+- 开启后由 Proxy 每轮自动选出合适的技能，通过一次客户端工具调用加载，
+  不再向系统提示词注入完整技能目录
 
-1. **L0 JSONL 分片日**：将以配置时区的午夜为界。如果你的服务器系统时区与配置时区不同，升级当天的分片文件名可能与之前一天有重叠——不会丢数据（cursor 按 instant 比较）。如有外部工具按文件名做去重/归档，请确认其能正确处理同一日期出现两次的情况。
-2. **cleaner `cleanTime` 触发时机**：从"系统时区的指定时刻"改为"配置时区的指定时刻"。
-3. **scene/persona META 头部时间戳格式**：新写入将使用 `YYYY-MM-DDTHH:mm:ss±HH:MM` 完整 ISO 8601。老数据保持原样，召回展示时由系统统一换算。
+### 📼 会话轨迹记录
 
-不动配置 = 行为完全不变。
+- Proxy 在每轮对话结束后，把发往上游的消息与模型回复记录到 MemoryCore
+  （新增 `/v3/session/add`，写入本地存储）；随 `tdai.enabled` 开启
+
+### 🧠 代码知识库
+
+- 私有代码仓支持 SSH 克隆（含非 22 端口），在面板获取 SSH 公钥后即可建图
+
+### 📈 可观测性
+
+- `/health` 新增 `ftsAvailable`，便于排查 BM25 关键词召回不可用的问题
+- LLM 调用失败日志补充状态码、URL 与响应内容
 
 ---
 
-## [0.3.6] - 2026-05-27
+## [2.0.2] — 2026-10-09
 
-### ✨ 新功能
+### 🗄️ MongoDB 存储后端（试验特性，可选，默认关闭）
 
-- **Recall 上下文预算控制** ([#71](https://github.com/Tencent/TencentDB-Agent-Memory/pull/71) / [#70](https://github.com/Tencent/TencentDB-Agent-Memory/issues/70))：新增 `recall.maxCharsPerMemory` 与 `recall.maxTotalRecallChars` 两项配置，默认 `0` 不改变现有行为；设置为正整数后，会在 L1 召回完成、注入 `<relevant-memories>` 之前按分数顺序裁剪超长条目并丢弃溢出部分，避免长会话因记忆膨胀挤占上下文。已在 README、README_CN 与 `openclaw.plugin.json` 同步说明。
-- **L1 / L2 / L3 提示词按用户输入语言自适应** ([#38](https://github.com/Tencent/TencentDB-Agent-Memory/issues/38))：`l1-extraction`、`l1-dedup`、`scene-extraction`、`persona-generation` 四个 prompt 中所有自由文本字段（`scene_name`、记忆 `content`、scene `.md` 标题/正文、`persona.md` 各章节）现在跟随用户消息的主导语言书写；JSON 字段名、枚举值、ISO 时间戳、`persona.md` 等结构化文件名继续保持英文作为稳定契约。无需配置 `locale`，任意语言（en / fr / ja / es / …）均可直接使用。
-- **Embedding `sendDimensions` 可选关闭**：`OpenAIEmbeddingService` 默认仍会在请求体携带 `dimensions` 字段（兼容 OpenAI `text-embedding-3-*` Matryoshka 截断）；新增 `embedding.sendDimensions` 配置项，设置为 `false` 时省略该字段，可对接 BGE-M3 等不支持自定义维度的固定维度模型（原会被服务端 HTTP 400 拒绝 `does not support matryoshka representation`）。
-- **Gateway 可选 Bearer 鉴权 + CORS 白名单**：新增 `server.apiKey` / `TDAI_GATEWAY_API_KEY` 配置项，设置后所有非 `/health` 路由需携带 `Authorization: Bearer <key>`（`crypto.timingSafeEqual` 防时序攻击）；新增 `server.corsOrigins` / `TDAI_CORS_ORIGINS` 配置项，显式指定允许的 CORS 来源列表（空列表 = 不发送 CORS 头，`"*"` = 保留旧版宽松行为）。启动时打印安全态势摘要，非回环地址 + 无 apiKey 时输出 WARN。两项均默认关闭，现有部署无需改动。Hermes Python 客户端同步支持 `MEMORY_TENCENTDB_GATEWAY_API_KEY` 环境变量自动附加 Bearer 头。
-- **Offload `collect` 模式**：新增 `offload.mode: "collect"` 配置，仅执行数据采集（L0 捕获 + 向量写入）而不触发 L3 压缩，适用于纯数据积累阶段或调试场景。
+- MongoDB 后端能力进一步补全：新增 memory-prompt 与 generation-ref 两类存储，
+  覆盖更多记忆数据结构
+- 一键入口 `./start-all-mongo.sh` 会把 `STORE_MODE` 持久化写入 `.env`，后续启动
+  保持同一后端，不再每次重复配置
+- 修复索引冲突场景的自愈能力，重复的默认/抽取记录不再导致启动报错
+
+### 🔀 更多客户端接入
+
+- **OpenCode** 新增官方 Memory adapter 配置包（含 `opencode.json` 与接入文档），按说明配置即可接入，无需编写插件代码
+- **OpenCode** 支持 2.0 的 v2 provider 配置结构，新版客户端可直接复用官方 `opencode.v2.json`
+- **DeepSeek Harness** 新增dsh桌面端适配，配置方式可参考`./agents/dsh/README.md`中1.6的部分
+- 新增 **Pi** 客户端接入（类似 Codex 的 AI Agent 客户端，走 OpenAI Chat 协议）
+
+### 🧠 外部源导入（Wiki / 代码 / 任务）
+
+- 新增从外部任务管理系统导入 Task 的能力，任务卡片直接展示来源、支持 ID 复制
+  与分页
+- 新增外部代码源（私有仓）注册与凭据隔离，各团队持有独立凭据、互不可见
+- 新增 Wiki 外部来源导入，与代码源、任务源一起补齐外部资产导入链路
+
+### 🧰 技能（Skill）体验优化
+
+- 冷启动批量技能抽取新增严格模式，抽取质量更可控
+- 技能抽取自动跟随用户语言，生成内容更贴合使用习惯
+- 技能列表支持按使用活跃度排序，高频技能更容易被找到
+
+### 🎛️ Memory Hub 面板
+
+- 任务卡片支持来源展示、ID 复制与分页优化，批量导入交互更顺畅
+- 手动刷新时自动重置时间筛选，新产生的记忆能即时看到
+
+### 🔄 会话与接入体验
+
+- 会话引导在更多客户端下更稳定：自动选中唯一 Agent、资产确认更精准、预设失败时
+  自动绕过而非卡住
+- 修复 WorkBuddy 并行子代理反复弹窗的问题，会话归一更稳健
+- 修复多种客户端下记忆命令、工具结果污染、历史消息重复等影响体验的问题
 
 ### 🐛 修复
 
-#### 数据安全 / 数据隔离
-- **L2 LLM 提取失败导致 `scene_blocks/` 被清空 / 半写入** ([#88](https://github.com/Tencent/TencentDB-Agent-Memory/issues/88))：Phase 1 已对 `scene_blocks/` 做完整快照，但 LLM 抛错时 `catch` 直接 `return`，沙箱里的部分写入 / 删除不会回滚，后续 recall 因此看不到场景导航，降级为碎片召回。新增 `BackupManager.findLatestBackup` + `restoreLatestDirectory`，在 LLM 失败时自动从最新备份恢复；采用 fail-soft 设计：无备份时不动目标目录，恢复过程自身的错误也不会替换原始 LLM 错误。
-- **Cleaner 安全加固**：`computeCutoffMsByLocalDay` 拒绝无效 cutoff（未来时间 / 距今不足 24h）；SQLite 与 TCVDB 在 `expired/total > 80%` 时阻止删除；`runOnce` 增加最小保留护栏（L0:50 / L1:20）并产出 `cleaner_summary` JSON 审计日志；新增 `__tests__/cleaner/verify-cleaner-safety.ts` E2E 校验。
-- **场景文件名含空格导致 Persona Scene Navigation 引用失效**：LLM 在 L2 偶发用 `Daily Rhythm in Shanghai.md` 这类含空格的名字创建 scene block，导致 `persona.md` 中 `### Path: scene_blocks/<name>.md` 引用无法被下游 `\S+\.md` 风格解析器（health-checker 等）识别，soak 后健康检查必报 `Scene Navigation 存在但无场景引用`。修复：(1) `scene-extraction` prompt 增加"📛 文件命名规范（强制）"段，禁止空格 / 括号 / 引号等标点；(2) 新增 `core/scene/filename-normalizer.ts`，在 `SceneExtractor.extract` Phase 5b（cleanup 后、`syncSceneIndex` 前）自动归一化文件名（空格 → `-`、剥离危险标点、冲突时追加 `-2` 后缀），下游 PersonaGenerator / recall / profile-sync 自动使用干净名，无需改动。
-
-#### OpenClaw 宿主兼容
-- **`api.runtime.state` 在新版 OpenClaw 上为 `undefined` 导致注册时崩溃** ([#78](https://github.com/Tencent/TencentDB-Agent-Memory/issues/78) / [#85](https://github.com/Tencent/TencentDB-Agent-Memory/pull/85) / [#79](https://github.com/Tencent/TencentDB-Agent-Memory/pull/79))：为两处调用点加可选链 + fallback，优先调用宿主 `runtimeState.resolveStateDir()`，缺失时退到 `OPENCLAW_STATE_DIR` 环境变量，再退到 `~/.openclaw`。同时修复 cli-metadata 注册模式下 `runtime` 为空对象 `{}` 仍会触发 `TypeError` 的问题（在该模式下提前 return，只调用 `registerCli`）。
-- **`contextEngine` slot ID 与插件名不一致**：`registerContextEngine` 的 ID 从 `openclaw-context-offload` 改为 `memory-tencentdb`，避免 `openclaw doctor --fix` 把 slot 重置；`setup-offload.sh` 中的 `CONTEXT_ENGINE_ID` 同步更新。
-- **L1.5 settle 永不返回导致 L2 卡死**：在 L2 poll 中为 L1.5 settle 增加 60s 超时，当未配置 Context Engine slot 导致 `assemble` 永不被调用时，自动 force-settle 解锁 L2。
-- **Standalone 文本任务仍暴露工具导致 DeepSeek 等后端 L1 抽取不稳定** ([#58](https://github.com/Tencent/TencentDB-Agent-Memory/issues/58) / [#59](https://github.com/Tencent/TencentDB-Agent-Memory/pull/59))：`enableTools=false` 时彻底不传工具列表（此前即便只读子集也会鼓励 OpenAI 兼容后端尝试 tool calling，DeepSeek 上尤其明显）。
-- **L2 cold-start skip 被错误地更新 `l2LastRunTime`**：导致首次 skip 后必须等满 `l2MaxInterval` 才会真正运行 L2；现在仅在确实跑过的情况下更新时间戳。
-
-#### Offload（Context Engine）稳定性
-- **`sanitizeText` 误删 emoji / CJK Extension B / Math Bold 等非 BMP 字符** ([#30](https://github.com/Tencent/TencentDB-Agent-Memory/issues/30) / [#31](https://github.com/Tencent/TencentDB-Agent-Memory/pull/31))：`UNSAFE_CHAR_RE` 含 `[\uD800-\uDFFF]` 但缺 `u` flag，JS 按 UTF-16 code unit 处理时会把每个非 BMP 码点的两个 surrogate 各自 strip 掉。加上 `u` flag 后只匹配孤立（畸形）surrogate，emoji / 扩展 CJK / 数学加粗等正常恢复；新增 vitest 套件覆盖保留与剥离两类 case。
-- **Emergency 截断在 `MIN_KEEP` 拒绝下死锁**：`EMERGENCY_MIN_MESSAGES_TO_KEEP` 由 4 降到 2；新增 `_emergencyTruncateOversized`，当 head/tail 删除均被阻塞时就地截断超大消息（保留 `tool_use` 块结构），最后兜底强制删除并配对清理 `toolResult`，在 LLM 可见的内容里加截断告示。
-- **多轮 aggressive compression 累计耗时**：由 6 轮 `O(N × rounds)` 全量 tiktoken 改为单趟 `O(N × 1)` 直接计算到目标阈值的精确切点。615 条消息从 84s 降到 ~14s；tool 配对、user 消息保护、MMD 保留、stall 检测等安全机制全部保留。
-- **FP-HEAD-DELETE 在多轮 FAST-SKIP 后误删新消息**：移除该路径，改用 `FP-BOUNDARY-DELETE`（基于上一轮 aggressive 边界的 O(1) 头部删除，index + fingerprint 双重验证、tool-pair 安全）+ `BOUNDARY-INCR-SKIP`（增量估算低于阈值时跳过 tiktoken）。重放场景下 `assemble` 38s → 122ms（310×）。
-- **首次 assemble 慢**：为 `TAIL-ACCUMULATE` 增加 fast-token-estimate（基于字符，~51× 快于 tiktoken）前置短路，无边界且 fast estimate 明显高于阈值时跳过全量 tiktoken；同时为 `TAIL-ACCUMULATE` 增加向后 tool-pair 校正、user 消息保护、最少保留 10 条等安全检查。首次 assemble 29s → ~1.4s。
-- **Token 计算精度**：`details` 字段加入 `INTERNAL_KEYS`（框架在送 LLM 前 strip 掉，不应计入 token）；新增 `_stripLargeFields()` 移除非内容大字段；就地截断后调用 `invalidateTokenCache(msg)` 修正 WeakMap 缓存陈旧问题；`bestTokens < 600` 时跳过截断防反向膨胀；stub 文本简化为纯英文避免触发模型内容过滤；`l3TiktokenEncoding` 默认从 `o200k_base` 改为 `cl100k_base`（匹配 DeepSeek / GLM / MiniMax 分词器）。
-- **Offload 日志降级**：`AGGRESSIVE` / `EMERGENCY` 等多数日志降到 debug，仅当超过 10s 时才输出 `SLOW` warn；Opik tracer 初始化、`after_tool_call` 无 session 等"正常 fallback"场景日志同步降级，减少 `plugins list` 噪音。
-
-#### Hermes / Docker 部署
-- **`Dockerfile.hermes` 生成的 `config.yaml` 缺 `api_key`** ([#77](https://github.com/Tencent/TencentDB-Agent-Memory/issues/77) / [#81](https://github.com/Tencent/TencentDB-Agent-Memory/pull/81))：`provider: custom` 模式下 Hermes 从 `config.yaml.model.api_key` 读密钥，而原 CMD 脚本仅写入 `.env` 的 `OPENAI_API_KEY`，造成容器内首条对话即报 401。修复为同步写入 `model.api_key: "${MODEL_API_KEY}"`。
-- **安装脚本多处问题** ([#18](https://github.com/Tencent/TencentDB-Agent-Memory/issues/18) / [#19](https://github.com/Tencent/TencentDB-Agent-Memory/issues/19) / [#20](https://github.com/Tencent/TencentDB-Agent-Memory/issues/20) / [#54](https://github.com/Tencent/TencentDB-Agent-Memory/pull/54) / [#55](https://github.com/Tencent/TencentDB-Agent-Memory/pull/55))：
-  - 支持 `HERMES_AGENT_DIR` 环境变量覆盖，适配 FHS 布局（把 hermes-agent 装在 `/usr/local/lib/hermes-agent` 等）。
-  - root 用户执行时不再 `su - root` 无限递归。
-  - `MEMORY_TENCENTDB_GATEWAY_CMD` 在 systemd 环境下用 `command -v node` 解析的绝对路径，`npx tsx` 改为 `node --import tsx/esm`，避免 nvm PATH 不可见时找不到 node。
-
-### ✨ 改进
-
-- **L1.5 settle 60s 超时保护**（详见上）。
-- **OpenAI-style standalone runner** 在 `enableTools=false` 时不再传任何工具（详见上）。
-- **`l3TiktokenEncoding` 默认改为 `cl100k_base`**，匹配主流国产/开源模型分词器。
-- **Docker 文档**：补充 `cd docker/opensource` 前置步骤；新增 question/consultation issue 模板。
-
-### 🧪 测试 / 内部
-
-- 新增 `src/utils/backup.test.ts`：`findLatestBackup` 4 个用例 + `restoreLatestDirectory` 5 个用例，真 fs 沙箱。
-- 新增 `src/core/scene/scene-extractor.restore.integration.test.ts`：用真临时目录 + 真 BackupManager 验证 LLM 失败时 `scene_blocks/` 被恢复（含 step 日志，沙箱保留供人工 inspect）。
-- 新增 `src/utils/openclaw-state-dir.test.ts` + `index.test.ts` cli-metadata 模式安全性用例。
-- 新增 `__tests__/cleaner/verify-cleaner-safety.ts` E2E（SQLite + live VDB）。
-- 新增 `src/offload/fast-token-estimate.ts` + `benchmark-token-estimate.ts` 基线脚本。
-
-### ⚠️ 配置项变化（向后兼容）
-
-| Key | 默认值 | 说明 |
-|---|---|---|
-| `recall.maxCharsPerMemory` | `0` | `0`/未设置 = 不裁剪 |
-| `recall.maxTotalRecallChars` | `0` | `0`/未设置 = 不裁剪 |
-| `embedding.sendDimensions` | `true` | `false` 时不在请求体携带 `dimensions`，适配 BGE-M3 等 |
-| `l3TiktokenEncoding` | `cl100k_base`（原 `o200k_base`） | 仅在显式依赖 `o200k_base` 时需手动覆盖回去 |
+- 修复无 embedding 场景下 BM25 召回异常、L0 工具结果污染与原文展示问题
+- 修复记忆召回为空、历史消息重复、多团队切换列表截断等问题
+- 修复 Claude Code 的 AGENTS.md 指令丢失等问题
+- 修复部署脚本在部分环境下的兼容性问题
 
 ---
 
-## [0.3.5] - 2026-05-15
+## [2.0.2-beta.1] — 2026-09-07
+
+### 🗄️ MongoDB 存储后端（试验特性，可选，默认关闭）
+
+默认存储仍为 sqlite，现有部署无需变更。MongoDB 作为可选后端提供，
+可用于需要 mongot 原生全文检索、或评估非 sqlite 数据面的场景：
+
+- 新增一键入口 `./start-all-mongo.sh`；未配置 `MONGODB_ENDPOINT` 时，
+  脚本在本机拉起 `mongodb-atlas-local` 容器（非云上 Atlas）
+- 启用后将 `MEMORY_CORE_STORE_MODE=mongodb` 写入 `.env`，后续启动
+  保持该后端，不会静默回退到 sqlite
+- **切换存储后端不会迁移已有数据。** sqlite 与 MongoDB 使用相互独立的
+  数据目录 / 实例，切换后原数据仍留在原后端。当前版本需自行备份并
+  手工迁移；后续版本将提供官方迁移工具
+
+用法见 [INSTALL_CN.md](./INSTALL_CN.md)「MongoDB 存储后端（试验特性）」章节。
+
+### 🧰 技能（Skill）体验优化
+
+- 技能检索与展示更结构化，信息更清晰、调用更稳定
+- 历史遗留的异常技能数据自动修复，旧资产无缝兼容
+
+### 🔄 会话与接入体验
+
+- 更多客户端接入更顺畅，文字模式客户端也能开箱即用
+- 团队 / Agent 选择列表完整展示，团队较多时不再漏选
+- 会话重置完成提示更清晰
+
+### 🔐 兼容 OAuth2 · 对接企业内部 OA 登录
+
+- Panel 登录侧兼容标准 OAuth2 协议，可对接企业内部 OA / SSO 系统
+- 各家 OA 协议细节不同，仓库里提供了对接骨架和配置项，
+  用户按自家 OA 的 `authorize` / `token` / `userinfo` 端点做少量适配即可
+- 完成对接后，团队成员可直接用 OA 账号登录 Panel，用户身份与 `user_key`
+  自动打通，不再需要单独下发/记忆一串 `sk-mem-...`
+
+### 📊 数据分析与可观测性（可选，默认关闭）
+
+- 全新数据分析页，团队使用情况一目了然，辅助你判断记忆资产的沉淀效果
+- 关键环节补充埋点与可观测数据，运维排查更直观
+- **默认关闭**；开启需要三个服务分别配置 ClickHouse：Proxy / Knowledge
+  负责埋点上报（Proxy 记录 memory / skill 工具调用，Knowledge 记录
+  wiki / code-graph 工具调用），Core 负责查询接口。Panel 会调用
+  Core 与 Knowledge 的配置发现接口判断是否启用，启用后再调查询接口
+  拉取数据。详见 [INSTALL_CN.md](./INSTALL_CN.md) 的
+  「数据分析与可观测性（可选）」章节
 
 ### 🐛 修复
 
-- **兼容 OpenClaw v2026.5.7 zod v4 子路径**：显式声明 `zod@^4.4.3` 依赖，解决 `@ai-sdk/provider-utils@4.x` 需要 `zod/v4` 子路径导出但宿主环境可能 hoist zod@3.x 引发 `Cannot find module zod/v4` 的运行时错误。
+- 修复部分场景下记忆召回为空、检索降级不生效的问题
+- 修复个别情况下记忆解析失败、历史消息重复的问题
+- 修复多团队切换时列表被截断、显示不全的问题
+- 修复部署脚本在部分环境下的兼容性问题
 
-### ✨ 改进
+---
 
-- **L1→L2 延迟从 90s 降至 10s**：`l2DelayAfterL1Seconds` 默认值 90→10，冷启动用户不再需要等待 ~90s 才能看到 L2 场景提取结果，体感更及时。
+## [2.0.1] — 2026-08-25
+
+### 🚀 支持更多 Agent 客户端
+
+现在无论你用哪款 coding agent，都能直接挂上团队记忆：
+
+- 新增 **OpenCode** 客户端接入
+- 新增 **DeepSeek Harness (dsh)** 接入 —— DeepSeek 官方 agent harness 的
+  Web UI 会话可直接接入 Proxy，自动获得团队记忆 / skill / 知识注入
+- 新增 **Codex CLI** 接入
+- 新增 **WorkBuddy** 客户端接入，开箱即用
+- 多款客户端的首次引导与重置体验保持一致，切换更顺畅
+
+### 🤖 会话内直接下指令
+
+不用切到面板，在对话里就能完成常用操作：
+
+- 会话中途一键重置绑定（换团队 / 换 Agent / 换任务）
+- 对话内直接创建 / 更新任务
+- 指令响应更快，减少等待
+
+### 🧠 冷启动开箱即用
+
+- 创建团队或用户即自动生成默认 Agent，无需手工配置
+- 管理员可自定义默认 Agent 模板，新用户冷启动自动套用
+- 支持从 IDE 里已有的 Agent 一键导入资产，快速起步
+- 接入后默认绑定任务，即开即用
+
+### 🔄 会话绑定更稳定
+
+- 会话绑定持久化保存，重启不丢失
+- 切换 Agent 后记忆与技能正确跟随切换，不再串场
+- 修复部分客户端历史回放被误判的问题
+
+### 🧰 技能（Skill）体验升级
+
+- 会话里新建的技能立即可被检索到，不再有"搜索盲区"
+- 恢复技能 ID 的展示与一键复制
+- 技能支持在线编辑
+- 新增接入向导技能：跟着引导一步步配置，或一条命令自动完成 Proxy 接入
+
+### 🎛️ Memory Hub 面板
+
+- 全新登录页，加入点阵波纹动效
+- 团队编辑 / 删除入口整合到团队切换器，操作更顺手、修复切换异常
+- 管理员创建账号时可自定义 User_Key
+- 新增对话记忆搜索：跨会话的语义与关键字检索，按权限精确控制可见范围；
+  支持对单层记忆直接覆盖修改
+- 资产 ID 直接展示并可复制；列表完整加载，修复分页截断显示不全的问题
+
+### ⚙️ 一键部署增强
+
+- 启动脚本支持交互式配置，自动预检 LLM 通路与端口占用，避免部署踩坑
+- 客户端接入地址一键复制，单机部署下自动解析为宿主机地址，外部客户端可直接连接
+
+### ⚡ 性能优化
+
+- 知识库列表加载提速，常用路径更快响应
+- Wiki 页面并发构建，单页失败自动重试，大批量文档导入时间大幅缩短
+
+### 📚 文档
+
+- 按客户端拆分独立接入文档，各 agent 各有一份清晰的接入指南
+- 新增面板与 API 使用文档
+- 补充英文面板截图与 README 更新
+
+### 🐛 修复
+
+- 修复多 Agent 场景下记忆检索为空的问题
+- 修复资产解绑不生效、资产较多时记忆 tab 丢失的问题
+- 修复导入历史会话时间错乱，恢复原始时间线
+- 修复编辑场景时部分内容被重复展开的问题
+- 修复 macOS 下部署脚本的兼容性问题
+- 修复依赖缺失导致的安装报错
+- 修复部分客户端首次引导表单在老版本上的兼容性问题
+- 新增清空对话记忆功能，支持批量删除
+
+---
+
+## [2.0.1-beta.1] — 2026-08-13
+
+### 🧠 冷启动开箱即用 · 默认 Agent + 预置 Skill
+
+- 创建团队/用户即自动生成默认 Agent，无需手工配置
+- 客户端接入地址一键复制，支持指向 Memory Proxy
+- 单机部署下接入地址自动解析为宿主机地址，外部客户端可直接连接
+
+### ⚡ Wiki 生成加速
+
+- 优化 Wiki 生成，页面并发构建，大幅缩短大批量文档导入时间
+- 单页失败自动重试，不再拖停整个批次
+- 生成进度与单页状态实时可见
+
+### 🧰 Skill 生态
+
+- 新增 Skill 导出功能
+- 优化 Skill 检索，私有 Skill 可被检索到，结果更精准
+- 优化 Skill 提取能力，捕获范围更广
+
+### 🔀 Memory Proxy · 新增客户端接入
+
+- 新增 Codex CLI 接入
+- 新增 WorkBuddy 客户端接入
+- 新增 DeepSeek Harness (dsh) 接入 —— DeepSeek 官方 agent harness 的 Web UI 会话
+  可直接接入 Proxy,拿到团队记忆 / skill / knowledge 注入;支持 aux 请求短路
+  (compaction / title-gen) 与 CLI headless bypass
+- 优化 code-graph 资源与工作区的关联
+
+### 🎛️ Memory Hub 面板
+
+- 重构首次使用引导流程，新增 Agent 绑定步骤
+- 优化面板交互、加载骨架屏与过渡动效
+- 优化 Task 页用户展示名解析
+- 优化资产页面布局与归属/共享规则说明
+- 修复资产较多时记忆 tab 丢失的问题
+
+### 🐛 修复
+
+- 修复多 Agent 场景下记忆检索为空的问题
+- 修复资产解绑不生效的问题
+- 导入的历史会话保留原始时间，时间线不再错乱
+- 修复某些场景下记忆丢失的问题
+- 新增清空对话记忆功能，支持批量删除
+
+---
+
+## [2.0.0] — 2026-08-03
+
+> **产品定位**：让 Agent 的经验、文档、代码沉淀成可复用资产，让下一位 Agent
+> 直接读档。详见 [README_CN.md](./README_CN.md)。
+
+### 🧠 四种记忆资产 · 首次完整开源
+
+四类资产从"对话/工作痕迹"里自动沉淀出来：
+
+- **Chat Memory** — 从对话中逐层提取 L0 原始记录 → L1 事实 → L2 场景 → L3
+  长期认知；跨会话保留偏好、决策、交互历史。
+- **Skill** — 从跑通的任务里提炼可复用 SOP，附版本 / 资源文件 / 触发边界 /
+  执行步骤 / 验证规则。新增 Skill 强制归档功能。
+- **Wiki** — 把文档变成结构化页面 + 链接图谱（灵感来自 Karpathy 的 LLM 知识库
+  实践）。
+- **CodeGraph** — 索引仓库的符号 / 文件 / 调用关系 / 影响路径，Agent 改代码
+  前先做 impact analysis。新增定时自动同步代码库功能。
+
+### 🎛️ Memory Hub · 面向团队的操作台
+
+管控面板（`agentmemory/memory-hub` 镜像，含 Panel + Knowledge Service）：
+
+- 建 Team / Agent，把资产按 Owner / 版本 / 状态 / 可见性统一管理
+- 三级可见性：`private` / `team` / `restricted`（User / Role / Agent ACL），
+  外加 `agent` 定向装配
+- Agent Loadout：给不同 Agent 绑定不同资产、调整优先级和使用方式
+- Wiki + CodeGraph 工坊内置在 Hub，导入代码库/文档就能自动构建
+- 管理员（System Admin）现在也可使用资产管理功能
+- 面板全面支持中英文切换；统一页面设计风格，优化列表交互和分页体验
+
+### 🔀 Memory Proxy · Agent 挂上记忆的通道
+
+`agentmemory/memory-proxy` 让 Claude Code 等 coding agent 直接用上团队记忆：
+
+- **Anthropic / OpenAI 双协议**：`/claude-code/<spaceId>/v1/messages` 和
+  `/v1/chat/completions` 都接
+- **首轮引导**：sessionInit 通过 `AskUserQuestion` 让用户选 team / agent /
+  task，proxy 记住绑定
+- **每轮注入**：把该 agent 的 L2/L3 记忆、matched skill、wiki/code-graph
+  拼进 system prompt，转发上游 LLM
+- **鉴权**：`x-tdai-user-key` → 内核 `/v3/meta/auth/verify` 换 `user_id`，
+  按用户维度控制资产可见性
+- Cost Guard 支持为不同 Agent 配置不同模型以降低成本
+
+### 🚀 一条命令拉起完整三件套
+
+三个镜像多架构（`linux/amd64` + `linux/arm64`）已发布到
+[Docker Hub `agentmemory`](https://hub.docker.com/u/agentmemory)，公开可拉、
+无需登录：
+
+```bash
+git clone https://github.com/Tencent/TencentDB-Agent-Memory.git
+cd TencentDB-Agent-Memory/deploy/global-images
+cp .env.example .env && $EDITOR .env    # 填入两组 LLM 参数
+./start-all.sh                          # 一键起
+```
+
+`start-all.sh` 首次启动会自动 `init-admin`、生成 admin `sk-mem-...` 并落盘
+`.admin-key`；自检 `/v3/meta/auth/verify` 后打印可复制的 `claude` 启动命令。
+`stop-all.sh --purge` 彻底清 volume + admin key，方便重置。
+
+详见 [INSTALL_CN.md](./INSTALL_CN.md) / [INSTALL.md](./INSTALL.md)。
+
+### 🧰 官方 SDK
+
+- **TypeScript** — `@tencentdb-agent-memory/memory-sdk-ts-v2`
+
+  ```ts
+  import { MemoryClient, SkillClient, MetadataClient } from "@tencentdb-agent-memory/memory-sdk-ts-v2";
+
+  const memory = new MemoryClient({
+    endpoint, apiKey, serviceId,
+    teamId, agentId, userId,     // v3 严格 isolation：三项必填
+  });
+  ```
+
+  顶级 export 就是 v3 严格 isolation 版本；老代码走 `.../v2/v3` 子路径也
+  能继续用（子路径保留为向后兼容别名）。
+
+- **Python** — `pip install tencentdb-agent-memory-sdk-python`
+
+  ```python
+  from tencentdb_agent_memory import MemoryClient                     # 默认（v2 兼容）
+  from tencentdb_agent_memory.v3 import MemoryClient, MetadataClient, SkillClient
+  ```
 
 ### 📖 文档
 
-- README 新增 Docker Quick Start 章节，说明模型 URL/Name 环境变量配置方式。
+- 新增 CodeBuddy / Hermes / OpenClaw 接入指南
+- 更新安装指南中的角色权限说明
 
 ---
 
-## [0.3.4] - 2026-05-12
+## [2.0.0-beta.1] — 2026-07-21
 
-### 🐛 修复
+首次公开发布。SemVer 从 `2.0.0-beta.1` 起步（npm 包名迁移到 `-v2` 后缀：
+`@tencentdb-agent-memory/memory-tencentdb-v2`、`memory-sdk-ts-v2`）。
+Docker 镜像 tag 独立于 npm 版本，本次镜像发的是 `:1.0.0-beta.1`。
 
-- **兼容 OpenClaw v2026.4.7 以下版本 L1 抽取空输出**：旧宿主不支持 `systemPromptOverride`，通过 `extraSystemPrompt` 回退注入系统提示，确保 LLM 按数据提取助手身份工作。
-- **TCVDB hybrid 召回冗余双重 HTTP 调用**：`auto-recall` 对 TCVDB 发两次相同的 `hybridSearch` 请求（且 keyword 路径将 FTS5 OR 表达式错误传入 BM25 编码器）。新增 `nativeHybridSearch` 短路，TCVDB 单次调用即可完成 dense + sparse + RRF，recall 耗时减半（~50-120ms）。
-- **L2 parser 对齐 Go 后端**：增加 mermaid fallback，修复 `first{...last}` JSON 提取逻辑。
+> **产品定位**：让 Agent 的经验、文档、代码沉淀成可复用资产，让下一位 Agent
+> 直接读档。详见 [README_CN.md](./README_CN.md)。
 
-### ✨ 改进
+### 🧠 四种记忆资产 · 首次完整开源
 
-- **VDB HTTP 请求级计时**：`tcvdb-client` 每次请求打一条 info 计时日志（`/document/hybridSearch 85ms`），retry/失败细节保持 debug 级别。
-- **启动路径误导性日志降级为 DEBUG**：store manifest 不一致、sqlite schema migration、profile-sync MD5 mismatch 等正常场景不再打 warn/info，避免 AI 误判。
-- **L1 提取调试日志**：新增 `[l1-debug]` 系列（RESOLVE / INVOKE / RESULT / EMPTY_DUMP / ENTRY / NO_JSON），方便定位 LLM 调用链问题。
+四类资产从"对话/工作痕迹"里自动沉淀出来：
 
-### 🔧 兼容性适配
+- **Chat Memory** — 从对话中逐层提取 L0 原始记录 → L1 事实 → L2 场景 → L3
+  长期认知；跨会话保留偏好、决策、交互历史。
+- **Skill** — 从跑通的任务里提炼可复用 SOP，附版本 / 资源文件 / 触发边界 /
+  执行步骤 / 验证规则。
+- **Wiki** — 把文档变成结构化页面 + 链接图谱（灵感来自 Karpathy 的 LLM 知识库
+  实践）。
+- **CodeGraph** — 索引仓库的符号 / 文件 / 调用关系 / 影响路径，Agent 改代码
+  前先做 impact analysis。
 
-- **OC 2026.4.23 Zod schema 兼容 patch 脚本**（`scripts/bugfix-20260423/`）：一键修复 `allowConversationAccess` 被 `.strict()` 拒绝的问题，含轻量版脚本、全自动脚本、手动 SOP 文档。
-- Offload 日志去掉 `Backend` 前缀，默认超时为 120s。
+### 🎛️ Memory Hub · 面向团队的操作台
 
-### 📦 新功能
+管控面板（`agentmemory/memory-hub` 镜像，含 Panel + Knowledge Service）：
 
-- **Offload Local Mode**：支持本地模式运行 offload（不依赖远端后端）。
-- **Docker 一体化镜像**（`Dockerfile.hermes`）：单容器捆绑 Hermes Agent + memory_tencentdb 插件 + TDAI Memory Gateway，统一 `MODEL_*` 环境变量驱动。
+- 建 Team / Agent，把资产按 Owner / 版本 / 状态 / 可见性统一管理
+- 三级可见性：`private` / `team` / `restricted`（User / Role / Agent ACL），
+  外加 `agent` 定向装配
+- Agent Loadout：给不同 Agent 绑定不同资产、调整优先级和使用方式
+- Wiki + CodeGraph 工坊内置在 Hub，导入代码库/文档就能自动构建
 
-### ✅ 测试
+### 🔀 Memory Proxy · Agent 挂上记忆的通道
 
-- 修复 `fault-injection` FI-05 mock config 缺 `embedding` 字段
-- 修复 `cli.test` dependencies 断言适配新增依赖
-- 跳过 `patch-effectiveness` 已删除的 `install-plugin.sh` 测试
+`agentmemory/memory-proxy` 让 Claude Code 等 coding agent 直接用上团队记忆：
 
----
+- **Anthropic / OpenAI 双协议**：`/claude-code/<spaceId>/v1/messages` 和
+  `/v1/chat/completions` 都接
+- **首轮引导**：sessionInit 通过 `AskUserQuestion` 让用户选 team / agent /
+  task，proxy 记住绑定
+- **每轮注入**：把该 agent 的 L2/L3 记忆、matched skill、wiki/code-graph
+  拼进 system prompt，转发上游 LLM
+- **鉴权**：`x-tdai-user-key` → 内核 `/v3/meta/auth/verify` 换 `user_id`，
+  按用户维度控制资产可见性
 
-## [0.3.3] - 2026-05-08
+### 🚀 一条命令拉起完整三件套
 
-### 🐛 修复
+三个镜像多架构（`linux/amd64` + `linux/arm64`）已发布到
+[Docker Hub `agentmemory`](https://hub.docker.com/u/agentmemory)，公开可拉、
+无需登录：
 
-- **加固 hook-policy 版本决策逻辑**：仅当宿主版本为严格 `x.y.z` 语义化版本、且 `>= 2026.4.24` 时才自动写入 `hooks.allowConversationAccess`；无法解析（如 `unknown`、beta、snapshot 等非标准版本）时一律跳过，避免对旧版本或非预期版本误写配置导致启动失败。
-- hook-policy 关键路径补充 debug 日志（原始版本串、解析后版本、最小要求版本、是否 patch 的决策），方便线上排查。
+```bash
+git clone https://github.com/Tencent/TencentDB-Agent-Memory.git
+cd TencentDB-Agent-Memory/deploy/global-images
+cp .env.example .env && $EDITOR .env    # 填入两组 LLM 参数
+./start-all.sh                          # 一键起
+```
 
-### ✅ 测试
+`start-all.sh` 首次启动会自动 `init-admin`、生成 admin `sk-mem-...` 并落盘
+`.admin-key`；自检 `/v3/meta/auth/verify` 后打印可复制的 `claude` 启动命令。
+`stop-all.sh --purge` 彻底清 volume + admin key，方便重置。
 
-- 新增 `src/utils/ensure-hook-policy.test.ts`，覆盖标准版本、预发布、`unknown`、边界值等决策 case。
+详见 [INSTALL_CN.md](./INSTALL_CN.md) / [INSTALL.md](./INSTALL.md)。
 
-## [0.3.2] - 2026-05-08
+### 🧰 官方 SDK
 
-### 🐛 修复
+- **TypeScript** — `@tencentdb-agent-memory/memory-sdk-ts-v2`
 
-- 兼容 OpenClaw v2026.4.23 前的版本，防止写入的 hook 配置导致无法启动
-- 修改 allowConversationAccess 到 2026.4.24+ 添加。
+  ```ts
+  import { MemoryClient, SkillClient, MetadataClient } from "@tencentdb-agent-memory/memory-sdk-ts-v2";
 
-## [0.3.1-beta.1] - 2026-05-07
+  const memory = new MemoryClient({
+    endpoint, apiKey, serviceId,
+    teamId, agentId, userId,     // v3 严格 isolation：三项必填
+  });
+  ```
 
-### 🐛 修复
+  顶级 export 就是 v3 严格 isolation 版本；老代码走 `.../v2/v3` 子路径也
+  能继续用（子路径保留为向后兼容别名）。
 
-- **兼容 OpenClaw v2026.4.23+ hook 权限策略**：该版本引入 `allowConversationAccess` 安全门控（[openclaw#70786](https://github.com/openclaw/openclaw/pull/70786)），导致非 bundled 插件的 `agent_end` hook 被静默拦截，整个 capture pipeline 失效。新增 `ensurePluginHookPolicy()` 自动检测并补全配置，优先通过 SDK 触发 gateway 自动重启，fallback 手动写入配置文件。
-- **兼容 OpenClaw 2026.5.3+ 安装校验**：新增 tsdown 构建配置生成 `dist/index.mjs`，满足新版安装时对编译产物的强制校验（不再允许纯 TypeScript 入口）。
-- **声明 `activation.onStartup`**：确保 gateway 在启动时加载本插件。
-- **声明 `contracts.tools`**：注册 `tdai_memory_search`、`tdai_conversation_search` 工具名，满足 tool registration contract 要求。
+- **Python** — `pip install tencentdb-agent-memory-sdk-python`
 
----
-
-## [0.3.0] - 2026-05-06
-
-### 🚀 新功能
-
-**运维管理工具（CTL）**
-
-- 新增 `memory-tencentdb-ctl` 命令行管理工具，支持 standalone 与 hermes 两种运行模式
-- 新增 `install-memory-tencentdb` 一键安装脚本
-- CTL 新增 `config vdb-off` 命令，支持将 Gateway 存储从 VDB 回退到 SQLite
-- Gateway 安装脚本支持将环境变量写入 `~/.hermes/.env`（systemd 场景）
-
-**Offload 增强**
-
-- Offload 启动时自动应用 `after_tool_call` patch，patch 失败时自动禁用 offload
-- 新增 `setup-offload.sh` 一键启用/禁用 offload 脚本，支持 `--backend-api-key` 参数
-- L0 捕获过滤：排除 offload 注入的 MMD 上下文块，避免将压缩中间产物误存为记忆
-
-**Gateway 自愈与稳定性**
-
-- Hermes 插件新增 watchdog + lazy probe 机制，Gateway 异常时自动恢复
-- Gateway YAML 配置解析支持任意深度嵌套
-
-### ✨ 改进
-
-- 数据目录与安装目录统一整合至 `~/.memory-tencentdb/`
-- 引入 `$HERMES_HOME` 环境变量约定，移除硬编码 `~/.hermes` 路径
-- CTL hermes 配置编辑改为缩进感知，保持原始文件格式
-- 运维脚本保留在 tarball 中但不再注册为 bin 命令（减少全局命令污染）
-- init/destroy 生命周期日志降级为 debug 级别
-- patch 脚本兼容 pnpm 安装环境，使用 Node.js 动态解析 openclaw 安装路径
-
-### 🐛 修复
-
-**Core 稳定性**
-
-- 修复 `ensureSchedulerStarted` 并发调用下的竞态问题
-- 修复 `/session/end` 错误销毁全局 scheduler 的问题（改为按 session_key 作用域）
-- 修复关闭 store 时未等待后台 fire-and-forget 任务完成的问题
-- 修复 `disable_offload` 未正确删除 `slots.contextEngine` 配置的问题
-
-**Offload**
-
-- 修复 slot 占用检测逻辑：仅在 `ok=false`（slot 被占用）时拒绝，API 异常不再误判为冲突
-- 修复 `registerContextEngine` 抛异常时未禁用 offload 的问题
-- 修复 slot 被占用时未完全禁用所有 offload 功能的问题
-
-**L3 压缩**
-
-- 修复 aggressive/emergency 压缩在用户消息位于队首时卡死的问题
-- 修复消息被大量 offload 后压缩停滞的问题
-
-**迁移工具**
-
-- 修复源数据目录或 SQLite 不存在时迁移脚本崩溃的问题（改为优雅跳过）
-- 修复源数据为空时 config/manifest 未写入的问题
-
-**脚本与运维**
-
-- 修复 `set -e` 环境下 `((VAR++))` 在 VAR=0 时导致脚本退出的问题
-- 修复 patch 脚本误报 FAILED 计数的问题（跳过无 after_tool_call 上下文的候选项）
-- 修复 Hermes 退出时未终止 Gateway 子进程的问题
-
-### ♻️ 重构
-
-- 统一 patch 检测逻辑：始终委托给 patch 脚本并通过退出码判定结果
-
----
-
-## [0.3.0-beta.1] - 2026-04-23
-
-### 🚀 新功能
-
-**短期记忆压缩（Context Offload）**
-
-- 新增 Offload 模块，支持长对话场景下的上下文压缩与记忆卸载
-
-**架构重构：Core + Gateway 多框架支持**
-
-- 重构为 `TdaiCore` 宿主无关的核心层 + 适配器模式，解耦 OpenClaw 框架依赖
-- 新增 `HostAdapter` / `LLMRunner` / `LLMRunnerFactory` 抽象接口，支持不同宿主的 LLM 调用
-- 新增 Hermes Gateway 适配器（`memory_tencentdb` Hermes Plugin），支持通过 Hermes 框架独立运行
-- `TdaiCore` 提供统一的 `handleBeforeRecall()` / `handleTurnCommitted()` / `searchMemories()` 等 API
-- Gateway 零配置自动发现：Hermes 插件自动检测配置和数据目录
-- 数据目录所有权从插件移至 Gateway 层管理
-
-**Recall 注入优化（Cache 友好）**
-
-- L1 召回记忆从 `appendSystemContext` 移到 `prependContext`（用户消息前缀），避免每轮系统提示词变化导致 prompt cache bust
-- Persona / Scene Navigation / Tools Guide 保持在 `appendSystemContext`（稳定内容，连续多轮 cache 命中）
-- 注册 `before_message_write` 钩子，在 user message 持久化到 JSONL 前 strip `<relevant-memories>` 标签，防止历史消息中累积旧的召回内容
-
-**分场景 Embedding 超时**
-
-- 新增 `embedding.recallTimeoutMs`（recall 路径）和 `embedding.captureTimeoutMs`（capture 路径）配置
-- recall 超时时 hybrid 策略自动降级为纯关键词搜索；capture 超时时 L1 dedup 降级为 FTS
-- 向前兼容：不配置时 fallback 到全局 `embedding.timeoutMs`
-
-### ✨ 改进
-
-- CleanContextRunner 通过 `systemPromptOverride` 替换 OpenClaw 默认系统提示词，每次 L1/L2/L3 调用节省 ~4500 input tokens
-- L2（场景提取）和 L3（画像生成）prompt 拆分为 `systemPrompt` + `userPrompt`，角色划分更清晰
-- Pipeline 默认参数调整：`l1IdleTimeoutSeconds` 60→600s，`l2MinIntervalSeconds` 300→900s，`l2MaxIntervalSeconds` 1800→3600s
-
-### 🐛 修复
-
-- 修复 `pullProfilesToLocal` 并发竞争导致 `ENOTEMPTY` 错误（乐观无锁修法：rename 竞争失败时静默使用对方结果）
-- 修复 `originalUserMessageCount` 数据链路断裂导致 L0 recorder 无法定位被污染的 user message
-- 修复 `RecallResult` 类型定义缺少 `prependContext` 字段（`types.ts` 与 `auto-recall.ts` 不一致）
-
----
-
-## [0.2.2] - 2026-04-17
-
-### 🐛 修复
-
-- 修复因未声明 `undici` 依赖导致 TCVDB 客户端加载失败的问题（开发环境之前依赖 monorepo 根 `node_modules` 的传递解析）
-- 将插件注册阶段的大量 INFO 日志降级为 DEBUG，避免 CLI 模式下输出过多无关日志
-
-## [0.2.1] - 2026-04-16 (deprecated)
-
-> NOTE: 此版本由于存在 undici 依赖导致插件启动失败的问题，已废弃
-> 相关问题在 0.2.2 及以后版本中已修复
-
-### 🚀 新功能
-
-- TCVDB 新增 HTTPS 连接支持，可通过插件配置 `caPemPath` 或迁移脚本参数 `--tcvdb-ca-pem` 指定自定义 CA 证书 PEM 文件
-- `read-local-memory` 脚本新增 L2 单文件查询，并将 L0 / L1 查询切换为直接从 `vectors.db` 读取，支持 SQL 层过滤、排序与分页
-
-### ✨ 改进
-
-- TCVDB 的 L0 / L1 向量索引默认调整为 `DISK_FLAT`，并在不支持该索引类型的实例上自动回退到 `HNSW`
-- 默认服务端 embedding 模型调整为 `bge-large-zh`
-- TCVDB 所有读接口统一启用 `readConsistency: "strongConsistency"`，消除 read-after-write 不一致
-- 健康检测脚本 VDB 连接支持 HTTPS 自签证书
-
-### 🐛 修复
-
-- 修复 L3 persona sync 因未拉取远端 baseline 导致版本冲突跳过写入的问题
-- 修复 `memories_since_last_persona` 被 L0 和 L1 双重计数导致 persona 触发阈值膨胀的问题
-- 移除 `CheckpointManager` 中已被 `captureAtomically()` 替代的废弃方法
-
----
-
-## [0.2.0] - 2026-04-15
-
-### 🚀 新功能
-
-**腾讯云向量数据库（TCVDB）存储后端**
-
-- 新增腾讯云向量数据库存储后端，支持向量 + BM25 混合召回
-- 支持 SQLite 与 TCVDB 之间的索引结构同步
-- L2 场景 / L3 画像支持在本地缓存与向量数据库之间双向同步
-- 插件配置（manifest）暴露 `storeBackend`、`tcvdb`、`bm25`、`embedding.timeoutMs` 等配置项
-
-**本地 BM25 关键字检索**
-
-- 使用本地 tcvdb-text 编码器替代原有的 BM25 HTTP sidecar 服务，消除外部依赖
-
-**Seed 数据导入工具**
-
-- 新增 CLI `seed` 命令，支持从外部数据批量导入记忆
-- 提取共享的 pipeline-factory，供 seed 和正常运行时复用
-- 支持 ISO 8601 时间戳格式（移除 JSONL 支持）
-
-**数据迁移与运维工具**
-
-- 新增 SQLite → 腾讯云向量数据库迁移脚本，支持 `--help` / `-h` 展示完整参数说明和使用示例
-- 新增 VDB 数据导出脚本（含预编译 JS 和 CLI 启动器）
-- 新增本地 Memory 数据查询脚本
-- 注册全部 CLI bin 入口：`migrate-sqlite-to-tcvdb`、`export-tencent-vdb`、`read-local-memory`
-
-**记忆搜索工具调用限制**
-
-- `tdai_memory_search` + `tdai_conversation_search` 增加每轮合计最多 3 次的调用次数限制，通过 tool description 和召回引导提示词约束模型行为，防止陷入无效重复搜索
-
-### 🐛 修复
-
-- 修复 L2 场景合并（MERGE）无法删除旧文件的问题：OpenClaw 4.1+ 的 write 工具拒绝空白内容，改用 `[DELETED]` 标记实现软删除，SceneExtractor cleanup 阶段同步识别并清理
-- 修复 L2 抽取产生孤立 BATCH/ARCHIVE 文件的问题，统一 maxScenes 上限为 15
-- 修复 L3 启动时重复拉取 profile 的问题
-- 过滤 skill wrapper 噪声标记（`¥¥[...]¥¥`）
-- 处理 `createCollection` 并发竞态（错误码 15202）
-
-### ♻️ 重构
-
-- Pipeline checkpoint 游标语义从 timestamp 改为 update_at
-- Runner 改用 `api.runtime.agent.runEmbeddedPiAgent`，避免跨环境导入失败
-- 统一脚本构建流程：新增 `build:scripts` 一键编译命令，`prepack` 钩子确保 `npm pack` 前自动编译全部脚本产物
-
-### 📚 文档
-
-- 新增 AI Agent 长期记忆插件设计与实现技术文档
-- 新增项目指南、研发系统分层架构文档
-- 新增 VDB 存储设计文档及迁移指南
-
----
-
-<details>
-<summary>预发布版本</summary>
-
-## [0.2.0-beta.1] - 2026-04-14
-
-*此版本的内容已合并至 [0.2.0] 正式版。*
-
-</details>
-
-## [0.1.4] - 2026-04-10
-
-### 🚀 Features
-
-- *(auto-recall)* Add recall hint text before memories
-
-## [0.1.3] - 2026-04-09
-
-### 🚀 功能
-
-- *(memory-tdai)* 用 reporter 抽象替换 emitMetric
-- *(L3)* L3 使用读写工具，防止模型输出 CoT
-- *(memory)* 添加 embedding 截断、召回超时，以及从 L0 捕获中剔除代码块
-- *(config)* Embedding 超时支持配置
-- *(report)* 在 schema 中暴露 report 配置项，默认值改为 false
-
-### 🐛 修复
-
-- *(capture)* 跳过心跳/定时任务/自动化/调度类消息
-- *(recall)* 召回完成时清除超时定时器，避免误报超时警告
-
-### 💼 Other
-
-- 重命名包名为 memory-tencentdb
-- *(deps)* 将 node-llama-cpp 改为可选依赖
-
-### ⚡ 性能
-
-- *(auto-capture)* 将 L0 向量嵌入移至后台以降低延迟
-
-### 📚 文档
-
-- 添加 allowPromptInjection 配置警告说明
-
-## [0.1.2] — 2026-03-26
-
-### 更新内容
-
-1. 优化对话捕获与记忆抽取过滤机制
-
-## [0.1.1] — 2026-03-25
-
-### 更新内容
-
-1. 兼容 openclaw 2026.3.23 更新
-
-## [0.1.0] — 2026-03-25
-
-> 首个正式发布版本。本地优先的四层记忆系统（L0→L1→L2→L3），基于 SQLite + LLM 实现对话捕获、记忆提取、场景归纳与用户画像。
-
-### 更新内容
-
-1. 关键字检索增加 FTS5 全文索引，采用 jieba 分词
-2. 未配置远程 embedding 服务时，默认不开启 embedding 能力（不自动使用本地 embedding，且封禁主动使用本地 embedding 的配置入口）
-3. 优化 L2、L3 生成 prompt 以控制生成内容大小（减少 token 开销）
-4. Pipeline 调度器优化文件锁用法
-5. 避免全量读取 L0、L1 数据
+  ```python
+  from tencentdb_agent_memory import MemoryClient                     # 默认（v2 兼容）
+  from tencentdb_agent_memory.v3 import MemoryClient, MetadataClient, SkillClient
+  ```

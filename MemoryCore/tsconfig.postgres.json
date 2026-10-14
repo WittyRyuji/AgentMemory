@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "esModuleInterop": true
+  },
+  "include": [
+    "src/core/store/postgres/client.ts",
+    "src/metadata/store/postgres-adapter.ts",
+    "src/core/store/postgres/memory-store.ts",
+    "src/core/storage/postgres-backend.ts",
+    "src/core/store/postgres/skill-store.ts",
+    "src/core/state/postgres-backend.ts",
+    "src/core/skill/conversation-add/postgres-agent-task-queue.ts",
+    "scripts/migrate-sqlite-to-postgres/cli.ts"
+  ]
+}

@@ -1,0 +1,15 @@
+# Copy to config/db.toml (gitignored). Protect with chmod 600.
+# Shared by Core, Knowledge, Panel and Proxy. Percent-encode URL passwords.
+[postgres]
+url = "postgresql://agentmemory:CHANGE_ME@127.0.0.1:5432/agentmemory"
+
+# Optional per-module overrides; omit to use [postgres].url.
+# [core]
+# url = "postgresql://.../core"
+# metadata_url = "postgresql://.../metadata"
+# [knowledge]
+# url = "postgresql://.../knowledge"
+# [panel]
+# url = "postgresql://.../panel"
+# [proxy]
+# url = "postgresql://.../proxy"
