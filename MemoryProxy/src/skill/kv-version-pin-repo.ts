@@ -59,7 +59,8 @@ export class KvVersionPinRepo {
       if (raw === null) return null;
       const n = Number(raw);
       return Number.isFinite(n) ? n : null;
-    } catch {
+    } catch (err) {
+      if (this.storage.type === 'postgres') throw err;
       return null;
     }
   }
@@ -83,7 +84,7 @@ export class KvVersionPinRepo {
             keyOf(spaceId, userId, agentSource, sessionId, p.skillId),
             String(p.version),
           )
-          .catch(() => false),
+          .catch((err) => { if (this.storage?.type === 'postgres') throw err; return false; }),
       ),
     );
   }
@@ -100,6 +101,6 @@ export class KvVersionPinRepo {
     if (!this.storage) return;
     await this.storage
       .putText(keyOf(spaceId, userId, agentSource, sessionId, skillId), String(version))
-      .catch(() => { /* silent */ });
+      .catch((err) => { if (this.storage?.type === 'postgres') throw err; });
   }
 }

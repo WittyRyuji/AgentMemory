@@ -161,9 +161,11 @@ export function tryActivateStorage(config: ProxyConfig): boolean {
   if (!config.storage?.enabled) return false;
   try {
     const storage = getProxyStorage(config.storage);
-    setSessionRepo(new KvSessionRepo(storage));
+    const sessionRepo = new KvSessionRepo(storage);
+    setSessionRepo(sessionRepo);
     setHookCacheRepo(new KvHookCacheRepo(storage));
     const store = getSessionStore();
+    store.setSessionRepo(sessionRepo);
     store.setBindingRepo(new KvBindingRepo(storage));
     const eff = getEffectiveBackend();
     console.log(
@@ -171,6 +173,7 @@ export function tryActivateStorage(config: ProxyConfig): boolean {
     );
     return true;
   } catch (err) {
+    if (config.storage.backend === 'postgres' || config.storage.backend === 'cos') throw err;
     console.warn(
       "[injection] ProxyStorage init failed, falling back to Redis/SQLite:",
       err instanceof Error ? err.message : String(err),
@@ -215,6 +218,7 @@ export function tryActivateRedis(config: ProxyConfig): boolean {
 export function ensureBindingRepoPersistent(config: ProxyConfig): void {
   const store = getSessionStore();
   if (store.getBindingRepo()) return; // 已有（storage/redis 激活过了）
+  if (config.storage?.backend === 'postgres') throw new Error('PostgreSQL bindings were not activated; local fallback disabled');
 
   const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
   const defaultFsRoot = `${home}/.memory-tencentdb/proxy-state`;

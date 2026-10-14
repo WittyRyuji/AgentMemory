@@ -1,7 +1,7 @@
 {
   "name": "@tencentdb-agent-memory/memory-tencentdb-v2",
   "version": "1.0.2-beta.1",
-  "description": "Four-layer local memory system plugin for OpenClaw — auto-captures, structures, and profiles conversational knowledge using local LLM + SQLite vector search (L0→L1→L2→L3 pipeline)",
+  "description": "Four-layer local memory system plugin for OpenClaw \u2014 auto-captures, structures, and profiles conversational knowledge using local LLM + SQLite vector search (L0\u2192L1\u2192L2\u2192L3 pipeline)",
   "type": "module",
   "main": "./dist/index.mjs",
   "bin": {
@@ -46,7 +46,10 @@
     "smoke:skill:all": "tsx scripts/smoke-skill/smoke-skill-all.ts",
     "e2e:memory-prompt:vdb-cos": "tsx scripts/e2e-memory-prompt-vdb-cos.ts",
     "import:opik": "tsx scripts/import-opik-to-memory-core/index.ts",
-    "postinstall": "bash scripts/openclaw-after-tool-call-messages.patch.sh 2>/dev/null || true"
+    "postinstall": "bash scripts/openclaw-after-tool-call-messages.patch.sh 2>/dev/null || true",
+    "test:postgres": "vitest run src/core/store/postgres src/metadata/store/postgres-adapter.test.ts",
+    "migrate:postgres": "node --import tsx scripts/migrate-sqlite-to-postgres/cli.ts",
+    "typecheck:postgres": "tsc -p tsconfig.postgres.json"
   },
   "files": [
     "dist/",
@@ -126,7 +129,8 @@
     "tsx": "^4.21.0",
     "undici": "^8.1.0",
     "yaml": "^2.8.3",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "pg": "^8.23.1"
   },
   "optionalDependencies": {
     "@clickhouse/client": "^1.18.5",
@@ -177,6 +181,9 @@
     "mongodb-memory-server": "^10.4.3",
     "tsdown": "^0.21.10",
     "typescript": "^6.0.2",
-    "vitest": "^4.1.2"
+    "vitest": "^4.1.2",
+    "@types/pg": "^8.23.1",
+    "@electric-sql/pglite": "0.5.9",
+    "@electric-sql/pglite-pgvector": "0.0.10"
   }
 }

@@ -159,6 +159,7 @@ export interface HydratedSessionRow {
 }
 
 export interface SessionRepo {
+  readonly strictPersistence?: boolean;
   /**
    * Write-through 语义：await 完成时 L2a 已落盘（或失败已被静默降级）。
    *
@@ -187,7 +188,7 @@ export interface SessionRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void;
+  ): void | Promise<void>;
   loadAllInitialized(): Promise<HydratedSessionRow[]>;
 }
 

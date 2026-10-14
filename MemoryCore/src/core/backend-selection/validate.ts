@@ -45,13 +45,15 @@ export function validateResolution(resolution: BackendResolution): void {
   // rows, and mongodb is the only DB whose store implements the profile-row
   // methods — sqlite has no rows to map, tcvdb has not implemented them (the
   // assembly guard would fail-fast anyway). Reject both before assembly.
-  if (fs.profile === "rows" && db.kind !== "mongodb") {
+  if (fs.profile === "rows" && db.kind !== "mongodb" && db.kind !== "postgres") {
     throw new BackendCapabilityError({
       dbKind: db.kind,
       fsKind: "rowfs",
       missing: PROFILE_ROW_METHODS,
     });
   }
+
+  if (fs.others.kind === "postgres" && db.kind !== "postgres") throw new BackendResolutionError("PostgreSQL file storage requires PostgreSQL memory storage");
 
   // mongofs stores its chunks in the instance's own Mongo database — without
   // db.kind="mongodb" there is no database to land them in.

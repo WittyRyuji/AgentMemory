@@ -18,6 +18,7 @@ import type { ProxyStorage, ProxyStorageType } from "./proxy-storage.js";
 import { MemoryStorage } from "./memory-storage.js";
 import { FsStorage } from "./fs-storage.js";
 import { SqliteStorage } from "./sqlite-storage.js";
+import { openPostgresStorage, PostgresStorage } from "./postgres-storage.js";
 import { CosStorage } from "./cos-storage.js";
 import type { CosLikeBackend, KernelStsCosOptions } from "./cos-types.js";
 
@@ -33,6 +34,7 @@ const _require = createRequire(import.meta.url);
  */
 export interface StorageConfig {
   backend: ProxyStorageType;
+  postgres?: { url: string };
   /** `ttl/` 前缀下对象的生存期（天）。只对 ttl 前缀生效。 */
   ttlDays: number;
 
@@ -96,10 +98,29 @@ let _kernelStsFactory: ((opts: KernelStsCosOptions) => CosLikeBackend) | null = 
  * 见 docs/design/2026-07-11-cos-submodule-extraction-plan.md §4.2 决策 3。
  */
 export async function initProxyStorage(config: StorageConfig): Promise<ProxyStorage> {
-  if (_instance) return _instance;
+  if (_instance) {
+    if (config.backend === 'postgres' && _instance.type !== 'postgres') throw new Error('[storage] PostgreSQL requested but another backend is active; no fallback');
+    return _instance;
+  }
+  if (config.backend === "postgres") {
+    _requested = 'postgres';
+    const storage = openPostgresStorage(config.postgres?.url || process.env.PROXY_POSTGRES_URL || process.env.DATABASE_URL || '');
+    try {
+      await storage.initialize();
+      _instance = storage;
+      _effective = 'postgres';
+      startSweeperIfNeeded(storage, config);
+      return storage;
+    } catch {
+      await storage.close();
+      _lastError = 'PostgreSQL initialization failed';
+      throw new Error('[storage] PostgreSQL initialization failed (no fallback)');
+    }
+  }
   if (config.backend === "cos") {
     try {
-      const mod = await import("@context-proxy/cost-guard");
+      const optionalModule = "@context-proxy/cost-guard";
+      const mod = await import(optionalModule);
       if (typeof mod.openKernelStsCosBackend === "function") {
         _kernelStsFactory = mod.openKernelStsCosBackend as (opts: KernelStsCosOptions) => CosLikeBackend;
       } else {
@@ -117,8 +138,14 @@ export async function initProxyStorage(config: StorageConfig): Promise<ProxyStor
 }
 
 export function getProxyStorage(config: StorageConfig): ProxyStorage {
-  if (_instance) return _instance;
+  if (_instance) {
+    if (config.backend === 'postgres' && _instance.type !== 'postgres') throw new Error('[storage] PostgreSQL requested but another backend is active; no fallback');
+    return _instance;
+  }
   _requested = config.backend;
+  if (config.backend === 'postgres') {
+    throw new Error('[storage] PostgreSQL must be initialized with await initProxyStorage(); no fallback');
+  }
 
   // ── cos：唯一正确的多节点共享后端，装配失败硬失败，绝不降级 ──────────────
   //
@@ -238,6 +265,7 @@ function orderFrom(preferred: ProxyStorageType): ProxyStorageType[] {
 
 function tryCreate(backend: ProxyStorageType, config: StorageConfig): ProxyStorage | null {
   switch (backend) {
+    case 'postgres': throw new Error('PostgreSQL requires async initialization');
     case "memory":
       return new MemoryStorage();
     case "fs": {
@@ -294,13 +322,17 @@ function openSqliteDb(dbPath: string): any {
 // 主仓通过 initProxyStorage() dynamic import 拿到 _kernelStsFactory 使用。
 
 function startSweeperIfNeeded(storage: ProxyStorage, config: StorageConfig): void {
-  if (storage.type !== "sqlite") return;
+  if (storage.type !== "sqlite" && storage.type !== "postgres") return;
   if (_sweepTimer) return; // already running
   const ttlMs = config.ttlDays * 86400 * 1000;
   const run = () => {
     try {
       // 只清 ttl bucket；nottl 永久保留（与 COS lifecycle rule 的语义一致）。
-      (storage as SqliteStorage).sweep({ ttlMs });
+      if (storage instanceof PostgresStorage) {
+        void storage.sweep({ ttlMs }).catch(() => console.warn(`${TAG} PostgreSQL TTL sweep failed`));
+      } else {
+        (storage as SqliteStorage).sweep({ ttlMs });
+      }
     } catch (err) {
       console.warn(`${TAG} sweeper error: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -308,4 +340,11 @@ function startSweeperIfNeeded(storage: ProxyStorage, config: StorageConfig): voi
   _sweepTimer = setInterval(run, 5 * 60 * 1000);
   // don't hold the event loop just for the sweeper
   if (typeof _sweepTimer.unref === "function") _sweepTimer.unref();
+}
+
+
+export async function closeProxyStorage(): Promise<void> {
+  if (_sweepTimer) { clearInterval(_sweepTimer); _sweepTimer = null; }
+  if (_instance instanceof PostgresStorage) await _instance.close();
+  _instance = null;
 }

@@ -1,5 +1,5 @@
 /**
- * Drizzle ORM schema — 4 SQLite tables for knowledge metadata.
+ * Drizzle ORM schema — PostgreSQL tables for knowledge metadata.
  *
  * Tables:
  *   knowledge_code_graph       — code repo index metadata + status
@@ -10,12 +10,19 @@
  * Soft-delete via `deleted_at` + partial unique index (WHERE deleted_at IS NULL).
  */
 
-import { sqliteTable, text, integer, uniqueIndex, index } from "drizzle-orm/sqlite-core";
+import {
+  pgTable,
+  text,
+  integer,
+  serial,
+  uniqueIndex,
+  index,
+} from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 // ───────────────────────── knowledge_code_graph ─────────────────────────
 
-export const knowledgeCodeGraph = sqliteTable(
+export const knowledgeCodeGraph = pgTable(
   "knowledge_code_graph",
   {
     codeGraphId: text("code_graph_id").primaryKey(),
@@ -46,13 +53,17 @@ export const knowledgeCodeGraph = sqliteTable(
     uniqueIndex("idx_kcg_team_repo_branch")
       .on(table.serviceId, table.teamId, table.repoUrl, table.branch)
       .where(sql`deleted_at IS NULL`),
-    index("idx_kcg_team_status").on(table.serviceId, table.teamId, table.status),
+    index("idx_kcg_team_status").on(
+      table.serviceId,
+      table.teamId,
+      table.status,
+    ),
   ],
 );
 
 // ───────────────────────── knowledge_wiki ─────────────────────────
 
-export const knowledgeWiki = sqliteTable(
+export const knowledgeWiki = pgTable(
   "knowledge_wiki",
   {
     wikiId: text("wiki_id").primaryKey(),
@@ -83,16 +94,20 @@ export const knowledgeWiki = sqliteTable(
     uniqueIndex("idx_kwiki_team_name")
       .on(table.serviceId, table.teamId, table.name)
       .where(sql`deleted_at IS NULL`),
-    index("idx_kwiki_team_status").on(table.serviceId, table.teamId, table.status),
+    index("idx_kwiki_team_status").on(
+      table.serviceId,
+      table.teamId,
+      table.status,
+    ),
   ],
 );
 
 // ───────────────────────── knowledge_wiki_audit ─────────────────────────
 
-export const knowledgeWikiAudit = sqliteTable(
+export const knowledgeWikiAudit = pgTable(
   "knowledge_wiki_audit",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     wikiId: text("wiki_id").notNull(),
     serviceId: text("service_id"),
     version: integer("version").notNull().default(0),
@@ -107,10 +122,10 @@ export const knowledgeWikiAudit = sqliteTable(
 
 // ───────────────────────── knowledge_code_graph_audit ─────────────────────────
 
-export const knowledgeCodeGraphAudit = sqliteTable(
+export const knowledgeCodeGraphAudit = pgTable(
   "knowledge_code_graph_audit",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     codeGraphId: text("code_graph_id").notNull(),
     serviceId: text("service_id"),
     version: integer("version").notNull().default(0),
@@ -120,36 +135,42 @@ export const knowledgeCodeGraphAudit = sqliteTable(
     detail: text("detail"),
     createdAt: text("created_at").notNull(),
   },
-  (table) => [index("idx_kcga_cg_version").on(table.codeGraphId, table.version)],
+  (table) => [
+    index("idx_kcga_cg_version").on(table.codeGraphId, table.version),
+  ],
 );
 
 // ───────────────────────── knowledge_source_credential ─────────────────────────
 // 外部知识源（wiki / codegraph）的令牌，**按资源 id 隔离**（非按用户）。
 // - 主键 (service_id, resource_type, resource_id)，与资源主键同构。
 // - resource_id 直接指向 code_graph_id / wiki_id，无外键约束（删资源由 store 级联删）。
-// - cred_secret 用 base64 存储（非加密），保密性由文件权限 + 接口不回吐承担；
+// - cred_secret 用 base64 存储（非加密），保密性由数据库权限 + 接口不回吐承担；
 //   详见 MemoryPanel/docs/design/2026-09-08-external-source-import.md §4.1.3。
 // - 明文永不出 KS：路由层仅回吐 metadata。
 
-export const knowledgeSourceCredential = sqliteTable(
+export const knowledgeSourceCredential = pgTable(
   "knowledge_source_credential",
   {
     serviceId: text("service_id").notNull(),
-    resourceType: text("resource_type").notNull(),   // 'code-graph' | 'wiki'
-    resourceId: text("resource_id").notNull(),       // = code_graph_id 或 wiki_id
-    providerId: text("provider_id").notNull(),       // 'gongfeng' / 'iwiki' / ...（非键）
-    credKind: text("cred_kind").notNull(),           // 'bearer' | 'basic'
-    credSecret: text("cred_secret").notNull(),       // base64(UTF-8 令牌)
-    credUsername: text("cred_username"),             // 仅 basic
-    credExtraJson: text("cred_extra_json"),          // mcp_url / corpid / header 名
+    resourceType: text("resource_type").notNull(), // 'code-graph' | 'wiki'
+    resourceId: text("resource_id").notNull(), // = code_graph_id 或 wiki_id
+    providerId: text("provider_id").notNull(), // 'gongfeng' / 'iwiki' / ...（非键）
+    credKind: text("cred_kind").notNull(), // 'bearer' | 'basic'
+    credSecret: text("cred_secret").notNull(), // base64(UTF-8 令牌)
+    credUsername: text("cred_username"), // 仅 basic
+    credExtraJson: text("cred_extra_json"), // mcp_url / corpid / header 名
     lastVerifiedAt: text("last_verified_at"),
-    createdBy: text("created_by"),                   // 审计：谁配的（不参与隔离）
+    createdBy: text("created_by"), // 审计：谁配的（不参与隔离）
     updatedBy: text("updated_by"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
   (table) => [
-    uniqueIndex("idx_ksc_pk").on(table.serviceId, table.resourceType, table.resourceId),
+    uniqueIndex("idx_ksc_pk").on(
+      table.serviceId,
+      table.resourceType,
+      table.resourceId,
+    ),
   ],
 );
 
@@ -158,7 +179,7 @@ export const knowledgeSourceCredential = sqliteTable(
 // mode='proxy' → call context_proxy with a dedicated knowledge-service user_key;
 // mode='byo'   → call a user-supplied OpenAI-compatible endpoint.
 
-export const llmBinding = sqliteTable("llm_binding", {
+export const llmBinding = pgTable("llm_binding", {
   serviceId: text("service_id").primaryKey(),
   mode: text("mode").notNull().default("proxy"),
   proxyBaseUrl: text("proxy_base_url"),
@@ -173,9 +194,11 @@ export const llmBinding = sqliteTable("llm_binding", {
 export type KnowledgeCodeGraph = typeof knowledgeCodeGraph.$inferSelect;
 export type KnowledgeWiki = typeof knowledgeWiki.$inferSelect;
 export type KnowledgeWikiAudit = typeof knowledgeWikiAudit.$inferSelect;
-export type KnowledgeCodeGraphAudit = typeof knowledgeCodeGraphAudit.$inferSelect;
+export type KnowledgeCodeGraphAudit =
+  typeof knowledgeCodeGraphAudit.$inferSelect;
 export type LlmBinding = typeof llmBinding.$inferSelect;
-export type KnowledgeSourceCredential = typeof knowledgeSourceCredential.$inferSelect;
+export type KnowledgeSourceCredential =
+  typeof knowledgeSourceCredential.$inferSelect;
 
 /** Data format version constants (reserved field). */
 export const CODE_DATA_VERSION = 0;

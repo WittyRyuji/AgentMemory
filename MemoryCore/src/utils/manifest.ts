@@ -20,7 +20,7 @@ import path from "node:path";
 // ============================
 
 export interface ManifestStoreInfo {
-  type: "sqlite" | "tcvdb" | "mongodb";
+  type: "sqlite" | "tcvdb" | "mongodb" | "postgres";
   sqlite?: {
     /** Relative path to the SQLite DB file (relative to dataDir). */
     path: string;
@@ -105,7 +105,8 @@ export function writeManifest(dataDir: string, manifest: Manifest): void {
 // ============================
 
 export interface StoreConfigSnapshot {
-  type: "sqlite" | "tcvdb" | "mongodb";
+  type: "sqlite" | "tcvdb" | "mongodb" | "postgres";
+  postgresSchema?: string;
   sqlitePath?: string;
   tcvdbUrl?: string;
   tcvdbDatabase?: string;
@@ -119,7 +120,9 @@ export interface StoreConfigSnapshot {
  */
 export function buildStoreInfo(snapshot: StoreConfigSnapshot): ManifestStoreInfo {
   const info: ManifestStoreInfo = { type: snapshot.type };
-  if (snapshot.type === "sqlite") {
+  if (snapshot.type === "postgres") {
+    return info; // Connection secrets are never written to a filesystem manifest.
+  } else if (snapshot.type === "sqlite") {
     info.sqlite = { path: snapshot.sqlitePath ?? "vectors.db" };
   } else if (snapshot.type === "mongodb") {
     info.mongodb = {

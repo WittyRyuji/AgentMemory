@@ -14,7 +14,7 @@
 
 import type { CosConfig, MongoConfig, VdbConfig } from "../instance-config-provider.js";
 
-export type DbKind = "sqlite" | "tcvdb" | "mongodb";
+export type DbKind = "sqlite" | "tcvdb" | "mongodb" | "postgres";
 
 /**
  * Env-surface vocabulary for `FILE_STORE_MODE` (两轴模型定稿 §5 映射的输入侧).
@@ -42,7 +42,7 @@ export type FsProfileMode = "files" | "rows";
  * byte in the instance's own Mongo database (zero disk), and is therefore
  * only legal when `db.kind === "mongodb"` (validate.ts).
  */
-export type FsOthersKind = "local" | "cos" | "mongofs";
+export type FsOthersKind = "local" | "cos" | "mongofs" | "postgres";
 
 /**
  * sqlite/local/mongofs carry `conn: null` on purpose:
@@ -52,13 +52,15 @@ export type FsOthersKind = "local" | "cos" | "mongofs";
  */
 export type DbChoice =
   | { kind: "sqlite"; conn: null }
+  | { kind: "postgres"; conn: null }
   | { kind: "tcvdb"; conn: VdbConfig }
   | { kind: "mongodb"; conn: MongoConfig };
 
 export type FsOthersChoice =
   | { kind: "local"; conn: null }
   | { kind: "cos"; conn: CosConfig }
-  | { kind: "mongofs"; conn: null };
+  | { kind: "mongofs"; conn: null }
+  | { kind: "postgres"; conn: null };
 
 export interface FsChoice {
   profile: FsProfileMode;

@@ -12,8 +12,7 @@ import { KNOWLEDGE_SERVICE_USERNAME } from '../../../startup/ensure-knowledge-ll
 import { DEFAULT_SKILLS } from './default-skills.js';
 import { extractListItems, isCallerSystemAdmin, resolveCallerUserId } from '../knowledge/common.js';
 import {
-  getAgentTemplate as readTemplateFile,
-  saveAgentTemplate as writeTemplateFile,
+  FileAgentTemplateStore,
   type AgentTemplateConfig,
 } from '../../../state/agent-template-store.js';
 
@@ -192,12 +191,12 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
       if (!teamId || !template || typeof template !== 'object') {
         return respondControlError(c, 400, 'INVALID_PARAM');
       }
-      writeTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId, template as AgentTemplateConfig);
+      await (deps.agentTemplates ?? new FileAgentTemplateStore(deps.config.agentTemplateDir)).save(ctx.instanceId, teamId, template as AgentTemplateConfig);
       return respondEnvelope(c, { code: 0, message: 'ok', request_id: ctx.reqId ?? '', data: { ok: true } });
     }
     if (action === 'agent/get-default-template') {
       const teamId = typeof body.team_id === 'string' ? body.team_id : '';
-      const template = teamId ? readTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId) : null;
+      const template = teamId ? await (deps.agentTemplates ?? new FileAgentTemplateStore(deps.config.agentTemplateDir)).get(ctx.instanceId, teamId) : null;
       return respondEnvelope(c, { code: 0, message: 'ok', request_id: ctx.reqId ?? '', data: template ?? {} });
     }
 
@@ -205,7 +204,7 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
 
     // team-member/add 成功后，为默认 Agent 复制模板资产（best-effort，异步不阻塞响应）
     if (action === 'team-member/add' && envelope.code === 0) {
-      void cloneDefaultAgentForNewMember(body, ctx, deps);
+      void cloneDefaultAgentForNewMember(body, ctx, deps).catch(() => deps.logger.error('default agent template cloning failed'));
     }
 
     if (action === 'user/list' && envelope.code === 0) {
@@ -243,7 +242,7 @@ async function cloneDefaultAgentForNewMember(
   if (!userId || !teamId) return;
 
   // 1. 读本地模板文件
-  const template = readTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId);
+  const template = await (deps.agentTemplates ?? new FileAgentTemplateStore(deps.config.agentTemplateDir)).get(ctx.instanceId, teamId);
   const hasTemplate = !!template?.name;
 
   // 2. 拿 username（拼 default-agent 名）

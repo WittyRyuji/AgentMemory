@@ -1,3 +1,4 @@
+import type { PostgresArtifactStore } from "./db/artifact-store.js";
 /**
  * Knowledge Module Factory — assembles store / services / engines / workers / restart recovery.
  *
@@ -9,10 +10,10 @@
 import { join } from "node:path";
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import pLimit from "p-limit";
-import simpleGit from "simple-git";
+import { simpleGit } from "simple-git";
 
 import type { Db } from "./db/client.js";
-import { SqliteKnowledgeStore, type IKnowledgeStore } from "./store/index.js";
+import { PostgresKnowledgeStore, type IKnowledgeStore } from "./store/index.js";
 import { WikiService, type WikiWorker } from "./store/index.js";
 import { CodeGraphService, type CodeGraphWorker } from "./store/index.js";
 import { BuildQueue } from "./store/index.js";
@@ -21,8 +22,18 @@ import {
   resolveLlmConfig,
   type ILlmBindingStore,
 } from "./store/llm-binding-store.js";
-import { createWikiSourceManager, type WikiSourceManager } from "./engines/wiki/index.js";
-import { indexProject, openIndex, syncIndex, getStats, closeIndex, type CodeGraphInstance } from "./engines/code/index.js";
+import {
+  createWikiSourceManager,
+  type WikiSourceManager,
+} from "./engines/wiki/index.js";
+import {
+  indexProject,
+  openIndex,
+  syncIndex,
+  getStats,
+  closeIndex,
+  type CodeGraphInstance,
+} from "./engines/code/index.js";
 import { SourceFetcherRegistry } from "./source-fetcher/index.js";
 import { createLogger } from "./logger.js";
 import type { LlmConfig } from "./config.js";
@@ -42,7 +53,11 @@ import { buildCloneUrl, stripCredentials } from "./code-source/clone-url.js";
 import { CodeSourceRegistry } from "./code-source/registry.js";
 import { WikiSourceRegistry } from "./wiki-source/registry.js";
 import { createWikiImporter } from "./wiki-source/wiki-importer.js";
-import { isGitAuthError, explainGitAuthError, isRemoteBranchMissingError } from "./source-fetcher/git-fetcher.js";
+import {
+  isGitAuthError,
+  explainGitAuthError,
+  isRemoteBranchMissingError,
+} from "./source-fetcher/git-fetcher.js";
 
 const log = createLogger("knowledge-module");
 
@@ -68,6 +83,7 @@ async function headCommitIfGit(dir: string): Promise<string | undefined> {
 // ───────────────────────── Module Config ─────────────────────────
 
 export interface KnowledgeModuleConfig {
+  artifactStore?: PostgresArtifactStore;
   dataDir: string;
   db: Db;
   /** LLM configuration for wiki ingest. */
@@ -98,7 +114,10 @@ export interface CodeGraphInstancePool {
   get(codeGraphId: string): CodeGraphInstance | undefined;
   set(codeGraphId: string, instance: CodeGraphInstance): void;
   delete(codeGraphId: string): void;
-  loadIfMissing?(codeGraphId: string, dir: string): Promise<CodeGraphInstance | undefined>;
+  loadIfMissing?(
+    codeGraphId: string,
+    dir: string,
+  ): Promise<CodeGraphInstance | undefined>;
 }
 
 export interface KnowledgeModule {
@@ -115,7 +134,7 @@ export interface KnowledgeModule {
   autoSyncScheduler: AutoSyncScheduler;
   /** 定时自动同步的解析后配置（挂载 admin 路由时透出）。 */
   autoSyncConfig: AutoSyncConfig;
-  /** 外部知识源用户令牌（加密存储，明文不出进程）。 */
+  /** 外部知识源用户令牌（base64 编码，数据库权限保护，接口不回吐）。 */
   credentialStore: ICredentialStore;
   /** 代码来源 provider 注册中心（前端下拉 + provider 查询）。 */
   codeSourceRegistry: CodeSourceRegistry;
@@ -129,47 +148,65 @@ export interface KnowledgeModule {
  * - Mark interrupted tasks as failed
  * - Async restore synced instances
  */
-export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeModule {
+export async function createKnowledgeModule(
+  config: KnowledgeModuleConfig,
+): Promise<KnowledgeModule> {
   const { dataDir, db, llmConfig } = config;
 
   // Store
-  const store = new SqliteKnowledgeStore(db);
+  const store = new PostgresKnowledgeStore(db);
 
   // Per-instance LLM routing binding + resolver (proxy/byo → effective LlmConfig).
   // No binding → global LLM_MODE decides: 'custom' uses global LLM_* direct,
   // 'proxy' (default) blanks creds so ingest fails loudly (no silent fallback).
   const llmBindingStore = createLlmBindingStore(db);
-  const resolveLlm = (serviceId: string): LlmConfig =>
-    resolveLlmConfig(serviceId, llmBindingStore.get(serviceId), llmConfig);
+  const resolveLlm = async (serviceId: string): Promise<LlmConfig> =>
+    resolveLlmConfig(
+      serviceId,
+      await llmBindingStore.get(serviceId),
+      llmConfig,
+    );
 
   // Instance pool (code-graph) — lazy loading
   const _poolMap = new Map<string, CodeGraphInstance>();
   const instancePool: CodeGraphInstancePool = {
-    get(id: string) { return _poolMap.get(id); },
-    set(id: string, inst: CodeGraphInstance) { _poolMap.set(id, inst); },
-    delete(id: string) { _poolMap.delete(id); },
+    get(id: string) {
+      return _poolMap.get(id);
+    },
+    set(id: string, inst: CodeGraphInstance) {
+      _poolMap.set(id, inst);
+    },
+    delete(id: string) {
+      _poolMap.delete(id);
+    },
     async loadIfMissing(id: string, dir: string) {
       if (_poolMap.has(id)) return _poolMap.get(id);
       try {
-        const instance = await openIndex(dir);
+        const instance = await openIndex(dir).catch(() => indexProject(dir));
         _poolMap.set(id, instance);
         log.info(`[code-graph] lazy-loaded instance ${id}`);
         return instance;
       } catch (err) {
-        log.warn(`[code-graph] lazy-load failed ${id}: ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(
+          `[code-graph] lazy-load failed ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
         return undefined;
       }
     },
   };
 
   // Wiki engine manager
-  const wikiMgr = createWikiSourceManager(join(dataDir, "_wiki_engines"));
+  const wikiMgr = await createWikiSourceManager(
+    join(dataDir, "_wiki_engines"),
+    { artifactStore: config.artifactStore },
+  );
 
   // Source fetcher registry (git/local/ftp routing + security validation)
   const fetcherRegistry = new SourceFetcherRegistry();
 
   // ── 外部来源凭据存储（base64；无密钥；见 §4.1.3） ──
-  const credentialStore = config.credentialStore ?? createCredentialStore({ db });
+  const credentialStore =
+    config.credentialStore ?? createCredentialStore({ db });
 
   // ── SSH 密钥存储（每用户一对 RSA；SSH 仓库 clone 时注入 GIT_SSH_COMMAND）──
   const sshKeyStore = config.sshKeyStore;
@@ -190,23 +227,31 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
    * 落库的是干净地址，此处拼出来的带凭据 URL 只活在本次调用栈里
    * （不写盘、不进日志、不进响应体）。
    */
-  const cloneUrlFor = (
+  const cloneUrlFor = async (
     serviceId: string,
     codeGraphId: string,
     repoUrl: string,
-  ): string => {
-    const ref = { type: "code-graph" as const, serviceId, resourceId: codeGraphId };
-    const cred = credentialStore.get(ref);
+  ): Promise<string> => {
+    const ref = {
+      type: "code-graph" as const,
+      serviceId,
+      resourceId: codeGraphId,
+    };
+    const cred = await credentialStore.get(ref);
     if (!cred) return repoUrl; // 无凭据 = 公开仓
-    const status = credentialStore.status(ref);
-    if (!status) throw new Error(`no credential row for code-graph ${codeGraphId}`);
+    const status = await credentialStore.status(ref);
+    if (!status)
+      throw new Error(`no credential row for code-graph ${codeGraphId}`);
     const provider = codeSourceRegistry.get(status.provider_id);
     if (!provider) {
       throw new Error(
         `code source provider '${status.provider_id}' is not registered (check CODE_SOURCE_ENABLED)`,
       );
     }
-    return buildCloneUrl(provider, repoUrl, { secret: cred.secret, username: cred.username });
+    return buildCloneUrl(provider, repoUrl, {
+      secret: cred.secret,
+      username: cred.username,
+    });
   };
 
   /**
@@ -223,7 +268,9 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
   ): Promise<void> => {
     try {
       await simpleGit(dir).remote(["set-url", "origin", cleanUrl]);
-      log.info("[code-graph] sanitized clone remote (credentials stripped)", { codeGraphId });
+      log.info("[code-graph] sanitized clone remote (credentials stripped)", {
+        codeGraphId,
+      });
     } catch (err) {
       log.warn("[code-graph] failed to sanitize clone remote", {
         codeGraphId,
@@ -262,16 +309,19 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
         "尚未为该用户生成 SSH 公钥，无法拉取仓库。请先获取 SSH 公钥并在代码平台完成配置后重试。",
       );
     }
-    return { ssh: { keyPath: key.keyPath, knownHostsPath: key.knownHostsPath } };
+    return {
+      ssh: { keyPath: key.keyPath, knownHostsPath: key.knownHostsPath },
+    };
   };
 
   // ── Real code-graph worker: fetch/sync via SourceFetcher + index ──
   const realCodeWorker: CodeGraphWorker = async (ctx) => {
-    const { dir, repoUrl, branch, codeGraphId, serviceId, setInternalStatus } = ctx;
+    const { dir, repoUrl, branch, codeGraphId, serviceId, setInternalStatus } =
+      ctx;
 
     // 外部来源（工蜂等）→ 注入令牌；无凭据行 → 公开仓。
     const cleanUrl = stripCredentials(repoUrl);
-    const effectiveUrl = cloneUrlFor(serviceId, codeGraphId, cleanUrl);
+    const effectiveUrl = await cloneUrlFor(serviceId, codeGraphId, cleanUrl);
     // 判定「是否私有仓」用 URL 是否被改写（等价于凭据行是否存在，且无需再查一次库）。
     const needsCredential = effectiveUrl !== cleanUrl;
 
@@ -295,11 +345,11 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
 
     if (canIncremental) {
       try {
-        setInternalStatus("fetching");
+        await setInternalStatus("fetching");
         const res = await fetcher.sync(effectiveUrl, branch, dir, sshOpts);
         version = res.version;
 
-        setInternalStatus("indexing");
+        await setInternalStatus("indexing");
         let instance = instancePool.get(codeGraphId);
         if (!instance) {
           instance = await openIndex(dir);
@@ -311,17 +361,25 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
         log.warn(
           `[code-graph] incremental sync failed for ${codeGraphId}, falling back to fresh clone: ${err instanceof Error ? err.message : String(err)}`,
         );
-        try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
       }
     }
 
     if (!didIncrementalSync) {
       // 私有仓重跑：旧目录还在（增量被跳过）→ 先清掉，否则 clone 到非空目录会失败。
       if (isExistingRepo) {
-        try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
       }
       mkdirSync(dir, { recursive: true });
-      setInternalStatus("cloning");
+      await setInternalStatus("cloning");
       let res;
       try {
         res = await fetcher.fetch(effectiveUrl, branch, dir, sshOpts);
@@ -346,12 +404,19 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
       version = res.version;
       // ★ 凭据落地清理：clone 会把带令牌的 URL 写进 .git/config 的 origin。
       //   不清理等于把用户 PAT 明文留在磁盘上（后续 git fetch 也一直用它）。
-      await sanitizeCloneRemote(dir, stripCredentials(repoUrl), serviceId, codeGraphId);
+      await sanitizeCloneRemote(
+        dir,
+        stripCredentials(repoUrl),
+        serviceId,
+        codeGraphId,
+      );
 
-      setInternalStatus("indexing");
+      await setInternalStatus("indexing");
       const instance = await indexProject(dir);
       instancePool.set(codeGraphId, instance);
     }
+
+    if (sshOpts) await sshKeyStore?.checkpoint?.(serviceId);
 
     // commit hash comes from the fetcher's FetchResult (unified after clone / sync)
     const commitHash = version ?? undefined;
@@ -359,7 +424,11 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
     const instance = instancePool.get(codeGraphId);
     const rawStats = instance ? getStats(instance) : undefined;
     const stats = rawStats
-      ? { files: rawStats.fileCount ?? rawStats.files ?? 0, nodes: rawStats.nodeCount ?? rawStats.nodes ?? 0, edges: rawStats.edgeCount ?? rawStats.edges ?? 0 }
+      ? {
+          files: rawStats.fileCount ?? rawStats.files ?? 0,
+          nodes: rawStats.nodeCount ?? rawStats.nodes ?? 0,
+          edges: rawStats.edgeCount ?? rawStats.edges ?? 0,
+        }
       : undefined;
     return { commitHash, stats };
   };
@@ -381,13 +450,17 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
       throw new Error(`代码目录不存在，无法构建：${dir}`);
     }
 
-    setInternalStatus("indexing");
+    await setInternalStatus("indexing");
     const instance = await indexProject(dir);
     instancePool.set(codeGraphId, instance);
 
     const rawStats = getStats(instance);
     const stats = rawStats
-      ? { files: rawStats.fileCount ?? rawStats.files ?? 0, nodes: rawStats.nodeCount ?? rawStats.nodes ?? 0, edges: rawStats.edgeCount ?? rawStats.edges ?? 0 }
+      ? {
+          files: rawStats.fileCount ?? rawStats.files ?? 0,
+          nodes: rawStats.nodeCount ?? rawStats.nodes ?? 0,
+          edges: rawStats.edgeCount ?? rawStats.edges ?? 0,
+        }
       : undefined;
 
     // commitHash：目录里带 .git 就读一下，没有或读不了就留空 —— 不因此判失败。
@@ -396,16 +469,23 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
 
   // ── Real wiki worker: ingest via wiki engine ──
   const realWikiWorker: WikiWorker = async (ctx) => {
-    const { wikiId, serviceId, teamId, dir, setInternalStatus, ingestRunId } = ctx;
-    setInternalStatus("ingesting");
+    const { wikiId, serviceId, teamId, dir, setInternalStatus, ingestRunId } =
+      ctx;
+    await setInternalStatus("ingesting");
 
     // Per-instance LLM routing (proxy/byo/global fallback), keyed by service_id.
-    const effectiveLlm = resolveLlm(serviceId);
+    const effectiveLlm = await resolveLlm(serviceId);
     // 进度只推 Panel（Panel 内存 store + wiki/get 聚合）；KS 不落进度态
     const onProgress = config.tmcCallbackUrl
-      ? buildProgressFn(config.tmcCallbackUrl, wikiId, serviceId, teamId, ingestRunId)
+      ? buildProgressFn(
+          config.tmcCallbackUrl,
+          wikiId,
+          serviceId,
+          teamId,
+          ingestRunId,
+        )
       : undefined;
-    wikiMgr.init({ name: wikiId, path: dir });
+    await wikiMgr.init({ name: wikiId, path: dir });
     await wikiMgr.ingest(
       wikiId,
       {
@@ -420,7 +500,7 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
       },
       { onProgress, globalLlmLimit },
     );
-    setInternalStatus("rebuilding-index");
+    await setInternalStatus("rebuilding-index");
 
     const pages = wikiMgr.getPages(wikiId);
     return { pageCount: pages.length };
@@ -435,19 +515,29 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
   const wikiService = new WikiService({
     store,
     dataRoot: dataDir,
+    artifactStore: config.artifactStore,
     worker: config.wikiWorker ?? realWikiWorker,
     queue: sharedQueue,
-    logger: { info: log.info.bind(log), warn: log.warn.bind(log), error: log.error.bind(log) },
+    logger: {
+      info: log.info.bind(log),
+      warn: log.warn.bind(log),
+      error: log.error.bind(log),
+    },
     callbackConfig,
   });
   const cgService = new CodeGraphService({
     store,
     dataRoot: dataDir,
+    artifactStore: config.artifactStore,
     worker: config.codeWorker ?? realCodeWorker,
     // 本地构建 worker（POST /code-graph/build 用）：只建索引、不拉取。可注入便于测试。
     localWorker: config.localCodeWorker ?? realLocalCodeWorker,
     queue: sharedQueue,
-    logger: { info: log.info.bind(log), warn: log.warn.bind(log), error: log.error.bind(log) },
+    logger: {
+      info: log.info.bind(log),
+      warn: log.warn.bind(log),
+      error: log.error.bind(log),
+    },
     callbackConfig,
     // 释放 code-graph 内存资源（008 delete 清理）：从 pool 移除并关闭索引句柄。幂等。
     releaseInstance: (codeGraphId: string) => {
@@ -460,20 +550,25 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
   });
 
   // Restart recovery: mark interrupted tasks as failed
-  const interrupted = store.markInterruptedAsFailed();
+  const interrupted = await store.markInterruptedAsFailed();
   if (interrupted > 0) {
     log.info(`marked ${interrupted} interrupted tasks as failed`);
   }
 
   // Background restore of synced instances (non-blocking)
-  void (async () => {
+  void (await (async () => {
     // Code-graph: lazy loading, just fix stats on startup
     try {
-      const allSynced = store.listSyncedCodeGraphs();
+      const allSynced = await store.listSyncedCodeGraphs();
       for (const row of allSynced) {
-        const dir = join(dataDir, row.service_id, row.team_id, row.code_graph_id);
+        const dir = join(
+          dataDir,
+          row.service_id,
+          row.team_id,
+          row.code_graph_id,
+        );
         try {
-          const instance = await openIndex(dir);
+          const instance = await openIndex(dir).catch(() => indexProject(dir));
           instancePool.set(row.code_graph_id, instance);
           const rawStats = getStats(instance);
           if (rawStats) {
@@ -482,37 +577,53 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
               nodes: rawStats.nodeCount ?? rawStats.nodes ?? 0,
               edges: rawStats.edgeCount ?? rawStats.edges ?? 0,
             });
-            store.updateCodeGraphStatus(row.service_id, row.code_graph_id, { stats_json: statsJson });
+            await store.updateCodeGraphStatus(
+              row.service_id,
+              row.code_graph_id,
+              { stats_json: statsJson },
+            );
           }
           log.info(`[code-graph] restored ${row.code_graph_id}`);
         } catch (err) {
-          log.warn(`[code-graph] failed to restore ${row.code_graph_id}: ${err instanceof Error ? err.message : String(err)}`);
+          log.warn(
+            `[code-graph] failed to restore ${row.code_graph_id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
       log.info(`[code-graph] ${allSynced.length} synced instances restored`);
     } catch (err) {
-      log.warn(`[code-graph] restore scan failed: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn(
+        `[code-graph] restore scan failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     // Wiki: register to engine manager
     try {
-      const allSyncedWikis = store.listSyncedWikis();
+      const allSyncedWikis = await store.listSyncedWikis();
       for (const row of allSyncedWikis) {
         const dir = join(dataDir, row.service_id, row.team_id, row.wiki_id);
         try {
-          wikiMgr.init({ name: row.wiki_id, path: dir });
+          await wikiMgr.init({ name: row.wiki_id, path: dir });
           const pages = wikiMgr.getPages(row.wiki_id);
           if (pages.length > 0) {
-            store.updateWikiStatus(row.service_id, row.wiki_id, { page_count: pages.length });
+            await store.updateWikiStatus(row.service_id, row.wiki_id, {
+              page_count: pages.length,
+            });
           }
-          log.info(`[wiki] restored index ${row.wiki_id} (${pages.length} pages)`);
+          log.info(
+            `[wiki] restored index ${row.wiki_id} (${pages.length} pages)`,
+          );
         } catch (err) {
-          log.warn(`[wiki] failed to restore ${row.wiki_id}: ${err instanceof Error ? err.message : String(err)}`);
+          log.warn(
+            `[wiki] failed to restore ${row.wiki_id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
     } catch (err) {
-      log.warn(`[wiki] restore scan failed: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn(
+        `[wiki] restore scan failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-  })();
+  })());
 
   // ── AutoSync Scheduler: 定时拉取 git 仓库并更新 codegraph / 外部 wiki ──
   const autoSyncConfig = resolveAutoSyncConfig();
@@ -536,8 +647,17 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
   autoSyncScheduler.start();
 
   return {
-    wikiService, cgService, wikiMgr, store, instancePool,
-    llmBindingStore, autoSyncScheduler, autoSyncConfig, credentialStore,
-    codeSourceRegistry, wikiSourceRegistry, sshKeyStore,
+    wikiService,
+    cgService,
+    wikiMgr,
+    store,
+    instancePool,
+    llmBindingStore,
+    autoSyncScheduler,
+    autoSyncConfig,
+    credentialStore,
+    codeSourceRegistry,
+    wikiSourceRegistry,
+    sshKeyStore,
   };
 }

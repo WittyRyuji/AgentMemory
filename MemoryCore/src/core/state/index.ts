@@ -22,7 +22,8 @@ import type { IStateBackend, TimerEntry } from "./types.js";
 import { LocalStateBackend } from "./local-backend.js";
 
 export interface StateBackendConfig {
-  type: "local" | "redis";
+  type: "local" | "redis" | "postgres";
+  postgres?: { url: string };
   local?: {
     onTimerExpired?: (entry: TimerEntry) => void;
   };
@@ -47,6 +48,13 @@ export interface StateBackendConfig {
  *   抛出明确错误。
  */
 export async function createStateBackend(config: StateBackendConfig): Promise<IStateBackend> {
+  if (config.type === "postgres") {
+    const { PostgresDatabase } = await import("../store/postgres/client.js");
+    const { PostgresStateBackend } = await import("./postgres-backend.js");
+    const backend = new PostgresStateBackend(PostgresDatabase.connect(config.postgres?.url ?? "", "__pipeline_state__"));
+    await backend.initialize();
+    return backend;
+  }
   if (config.type === "redis") {
     const redisCfg = config.redis;
     if (!redisCfg) throw new Error("redis config is required when state_backend=redis");

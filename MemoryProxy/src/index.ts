@@ -31,7 +31,7 @@ import { initTraceArchive, shutdownTraceArchive } from "./trace-archive.js";
 import { initAuth } from "./auth.js";
 import { initSystemUsers } from "./systemUser.js";
 import { checkConnectivity } from "./connectivity.js";
-import { initProxyStorage, getEffectiveBackend } from "./storage/factory.js";
+import { initProxyStorage, getEffectiveBackend, closeProxyStorage } from "./storage/factory.js";
 import { flushPendingWrites, pendingWriteCount } from "./tdai/pending-writes.js";
 
 const overrides = parseArgv(process.argv);
@@ -173,6 +173,7 @@ async function gracefulShutdown(signal: "SIGTERM" | "SIGINT"): Promise<void> {
   await shutdownTraceArchive();
   await shutdownLangfuse();
   await shutdownClickHouse();
+  await closeProxyStorage();
   await shutdownLogger();
   process.exit(0);
 }

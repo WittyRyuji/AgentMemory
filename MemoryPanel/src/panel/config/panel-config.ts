@@ -86,6 +86,8 @@ function resolveSessionSecret(identityStorePath: string): string {
 }
 
 export interface PanelConfig {
+  /** Explicit opt-in; PostgreSQL errors never fall back to local files. */
+  state?: { backend: 'file' | 'postgres'; postgresUrl: string };
   server: { host: string; port: number };
   metadataInstancesConfig: string;
   metadataRemoteTimeoutMs: number;
@@ -232,9 +234,14 @@ function buildAuthConfig(): PanelAuthConfig {
 }
 
 export function loadPanelConfig(): PanelConfig {
+  const stateBackend = env('PANEL_STATE_BACKEND', 'file');
+  if (stateBackend !== 'file' && stateBackend !== 'postgres') throw new Error('invalid PANEL_STATE_BACKEND');
+  const postgresUrl = env('PANEL_POSTGRES_URL', env('DATABASE_URL', ''));
+  if (stateBackend === 'postgres' && !postgresUrl) throw new Error('PANEL_POSTGRES_URL or DATABASE_URL is required');
   const level = env('LOG_LEVEL', 'info') as LogLevel;
   const format = env('LOG_FORMAT', 'json') as 'json' | 'pretty';
   return {
+    state: { backend: stateBackend, postgresUrl },
     server: {
       host: env('HOST', '0.0.0.0'),
       port: envInt('PORT', 8123),

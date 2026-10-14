@@ -1,3 +1,4 @@
+import { PostgresSkillAgentTaskQueue } from "../core/skill/conversation-add/postgres-agent-task-queue.js";
 /**
  * TDAI Gateway — HTTP server for the Hermes sidecar.
  *
@@ -462,7 +463,9 @@ export class TdaiGateway {
       const fallbackSqliteBaseDir = join(this.config.data.baseDir, "metadata");
       const config = validateMetadataStartupConfig(
         this.config.deployMode,
-        process.env,
+        this.config.memory.storeBackend === "postgres"
+          ? { ...process.env, TDAI_METADATA_POSTGRES_URL: process.env.TDAI_METADATA_POSTGRES_URL || this.config.memory.postgres.url }
+          : process.env,
         fallbackSqliteBaseDir,
       );
       this.metadataStorePool = new MetadataStorePool(config);
@@ -513,7 +516,7 @@ export class TdaiGateway {
         this.ensureMetadataStore(instanceId),
         this.ensureMetadataStorePool(),
       ]);
-      const storeSource = pool.backend === "mongodb" ? "mongodb-adapter.ts" : "sqlite-adapter.ts";
+      const storeSource = pool.backend === "postgres" ? "postgres-adapter.ts" : pool.backend === "mongodb" ? "mongodb-adapter.ts" : "sqlite-adapter.ts";
       const rawSvc = new MetadataService(
         wrapApiStoreForTrace(store, storeSource),
         instanceId,
@@ -555,6 +558,15 @@ export class TdaiGateway {
     initDataDirectories(this.config.data.baseDir);
 
     applyMetadataEnvFromGatewayConfig(this.config.metadata);
+    // A PG data plane must never silently create SQLite metadata/state files.
+    if (this.config.memory.storeBackend === "postgres") {
+      process.env.TDAI_METADATA_POSTGRES_URL ||= this.config.memory.postgres.url;
+      if (this.config.stateBackend !== "postgres") throw new Error("PostgreSQL mode requires STATE_BACKEND=postgres");
+      if (this.config.data.fileStore !== "rowfs" || this.config.data.fileStoreOthers !== "postgres") {
+        throw new Error("PostgreSQL mode requires FILE_STORE_MODE=rowfs and FILE_STORE_OTHERS=postgres");
+      }
+    }
+
     // yaml `taskSource.env` → process.env（env 已设置则不覆盖）。
     // 必须在任何 task-source 路由 / provider 调用之前：registry 在构造上下文时
     // 就直接读 env，晚于此处回填会拿到空串并被判为「未配置」而 fail-fast。
@@ -701,7 +713,7 @@ export class TdaiGateway {
     // In standalone mode, use LocalStorageBackend pointing to dataDir.
     // In service mode, CosStorageBackend was already injected above.
     if (!this.core.getStorage()) {
-      if (this.config.data.fileStore === "rowfs") {
+      if (this.config.data.fileStore === "rowfs" || this.storePool?.mode === "postgres") {
         // standalone + rowfs：核心存储即组合后端（行视图 + 本地回退），
         // 与 v2 数据面共用同一装配点，管道/插件路径同样命中行。
         const rowfsAdapter = await this.resolveStorageForInstance(this.config.instanceId ?? "default");
@@ -1135,7 +1147,7 @@ export class TdaiGateway {
         // 复用 Memory 侧的 COS adapter，创建 per-instance SkillCore。
         // Skill queue + worker 如果已在 tdai-core 中启动则复用；否则
         // service 模式下可在此处单独启动。
-        if (storePool.mode === "tcvdb" || storePool.mode === "mongodb") {
+        if (storePool.mode === "tcvdb" || storePool.mode === "mongodb" || storePool.mode === "postgres") {
           // per-instance resolvers 抽到了私有方法（同一份实现被 handler 和 skill worker 共用）。
           // tcvdb: TcvdbSkillStore + COS storage；mongodb: MongoSkillStore + (standalone) LocalStorage / (service) COS。
           skillDeps.resolveSkillCore = (instanceId: string) => this.resolveSkillCoreForInstance(instanceId);
@@ -1151,7 +1163,7 @@ export class TdaiGateway {
         //   - handleConversationAdd 用 .handler
         //   - handleExtract 用 .trigger (direct-trigger)
         skillDeps.resolveConversationAdd = async (instanceId: string) => {
-          const wired = storePool.mode === "tcvdb" || storePool.mode === "mongodb"
+          const wired = storePool.mode === "tcvdb" || storePool.mode === "mongodb" || storePool.mode === "postgres"
             ? await this.ensureConversationAddForInstance(instanceId)
             : await this.ensureConversationAddForStandalone(instanceId);
           return wired;
@@ -1448,6 +1460,10 @@ export class TdaiGateway {
       try {
         await this.storePool.evict(instanceId);
         this.storePool.evictSkillStore(instanceId);
+        if (this.storePool.mode === "postgres") {
+          await this.storePool.getPostgresDatabase(instanceId).drop();
+          cleaned.postgres_schema_dropped = true;
+        }
         cleaned.store_evicted = true;
         cleaned.skill_store_evicted = true;
       } catch (err) {
@@ -1797,7 +1813,7 @@ export class TdaiGateway {
     // Determine backend type from config (env > yaml > auto from deployMode):
     //   - "standalone" → local (in-process Map/setTimeout, zero dependencies)
     //   - "service"    → remote state backend
-    const backendType: "redis" | "local" =
+    const backendType: "redis" | "local" | "postgres" =
       this.config.stateBackend ?? (this.config.deployMode === "service" ? "redis" : "local");
 
     this.logger.info(`Starting integrated services (deployMode=${this.config.deployMode}, state_backend=${backendType})...`);
@@ -1806,6 +1822,7 @@ export class TdaiGateway {
     const { createStateBackend } = await import("../core/state/index.js");
     this.stateBackend = await createStateBackend({
       type: backendType,
+      postgres: backendType === "postgres" ? { url: this.config.memory.postgres.url } : undefined,
       local: backendType === "local" ? {
         onTimerExpired: (entry) => {
           // Parse timer member by prefix: "offload-{type}:{instanceId}:{sessionId}[:{extra}]"
@@ -1950,10 +1967,10 @@ export class TdaiGateway {
     // VDB is available — set STORE_MODE=sqlite to keep the VDB-dependent
     // pieces local while exercising the rest of the service-mode wiring.
     const storeModeOverride =
-      process.env.STORE_MODE === "sqlite" || process.env.STORE_MODE === "tcvdb" || process.env.STORE_MODE === "mongodb"
-        ? (process.env.STORE_MODE as "sqlite" | "tcvdb" | "mongodb")
+      process.env.STORE_MODE === "sqlite" || process.env.STORE_MODE === "tcvdb" || process.env.STORE_MODE === "mongodb" || process.env.STORE_MODE === "postgres"
+        ? (process.env.STORE_MODE as "sqlite" | "tcvdb" | "mongodb" | "postgres")
         : undefined;
-    const effectiveStoreMode = storeModeOverride ?? (this.config.deployMode === "service" ? "tcvdb" : "sqlite");
+    const effectiveStoreMode = storeModeOverride ?? (this.config.memory.storeBackend === "postgres" ? "postgres" : undefined) ?? (this.config.deployMode === "service" ? "tcvdb" : "sqlite");
     // T12 fail-fast: mongodb backend hard-requires MONGODB_ENDPOINT/DATABASE
     // (delivered via LocalConfigSource.fetchMongo). Missing them is a config
     // error we surface at boot instead of on the first request.
@@ -1991,7 +2008,7 @@ export class TdaiGateway {
     if (this.config.features.backendResolver) {
       this.backendResolver = new LocalBackendResolver({
         deployMode: this.config.deployMode,
-        storeMode: storeModeOverride,
+        storeMode: effectiveStoreMode,
         fileStore: this.config.data.fileStore,
         fileStoreOthers: this.config.data.fileStoreOthers,
         source: this.configProvider,
@@ -2310,12 +2327,13 @@ export class TdaiGateway {
   private async purgeSkillQueueForInstance(instanceId: string): Promise<{
     tuples_removed: number;
     locks_removed: number;
-    backend: "redis" | "local" | "none";
+    backend: "redis" | "local" | "postgres" | "none";
   }> {
     const queue = this.skillSharedQueue;
     if (!queue) {
       return { tuples_removed: 0, locks_removed: 0, backend: "none" };
     }
+    if (queue instanceof PostgresSkillAgentTaskQueue) return queue.purgeInstance(instanceId);
     const prefixSegment = `${instanceId}|`;
     const memoryPrefix = this.config.redis?.keyPrefix ?? "tdai_memory";
     const keyPrefix = `${memoryPrefix}:skill-conv`;
@@ -2399,6 +2417,10 @@ export class TdaiGateway {
 
   private ensureSkillSharedQueue(): ISkillAgentTaskQueue {
     if (this.skillSharedQueue) return this.skillSharedQueue;
+    if (this.storePool?.mode === "postgres") {
+      this.skillSharedQueue = new PostgresSkillAgentTaskQueue(this.storePool.getPostgresDatabase("__skill_queue__"));
+      return this.skillSharedQueue;
+    }
     const memoryPrefix = this.config.redis?.keyPrefix ?? "tdai_memory";
     const keyPrefix = `${memoryPrefix}:skill-conv`;
     const redisClient = this.getSharedIoRedisClient();
@@ -2443,7 +2465,7 @@ export class TdaiGateway {
     //     MongoSkillStore). This holds even for standalone + STORE_MODE=mongodb.
     //   - otherwise (sqlite singleton) → TdaiCore's standalone SkillExtractor.
     const usePerInstanceSkill =
-      this.storePool?.mode === "tcvdb" || this.storePool?.mode === "mongodb";
+      this.storePool?.mode === "tcvdb" || this.storePool?.mode === "mongodb" || this.storePool?.mode === "postgres";
 
     this.skillWorkerPool = new SkillWorkerPool({
       concurrency: skillCfg.worker.concurrency,
@@ -2723,6 +2745,7 @@ export class TdaiGateway {
    * a COS outage fails the request fast (503) instead of blocking on retries.
    */
   private async resolveSessionStorageForInstance(instanceId: string): Promise<StorageAdapter> {
+    if (this.storePool?.mode === "postgres") return this.resolveFileOthersForInstance(instanceId);
     if (!this.sharedCosClient && this.config.deployMode !== "standalone") {
       await this.initSharedCosClient(1);
     }
@@ -2734,6 +2757,10 @@ export class TdaiGateway {
    * 既是 local/cos 模式的正面路径，也是 rowfs 模式组合后端的 others 侧。
    */
   private async resolveFileOthersForInstance(instanceId: string): Promise<StorageAdapter> {
+    if (this.storePool?.mode === "postgres") {
+      const { PostgresStorageBackend } = await import("../core/storage/postgres-backend.js");
+      return new StorageAdapter(new PostgresStorageBackend(this.storePool.getPostgresDatabase(instanceId)));
+    }
     const cached = this.cosStorageCache?.get(instanceId);
     if (cached) return cached;
 

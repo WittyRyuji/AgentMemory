@@ -206,7 +206,7 @@ export interface TcvdbConfig {
 }
 
 /** Storage backend type. */
-export type StoreBackend = "sqlite" | "tcvdb" | "mongodb";
+export type StoreBackend = "sqlite" | "tcvdb" | "mongodb" | "postgres";
 
 /** Report settings — controls metric/event reporting. */
 export interface ReportConfig {
@@ -364,6 +364,7 @@ export interface MemoryTdaiConfig {
   embedding: EmbeddingConfig;
   /** Storage backend: "sqlite" (default) or "tcvdb" */
   storeBackend: StoreBackend;
+  postgres: { url: string; instanceId: string };
   /** Tencent Cloud VectorDB configuration (required when storeBackend = "tcvdb") */
   tcvdb: TcvdbConfig;
   /** BM25 sparse vector encoding (local @tencentdb-agent-memory/tcvdb-text) */
@@ -579,10 +580,12 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
   const bm25Group = obj(c, "bm25");
 
   // --- Store backend ---
-  const storeBackendRaw = str(c, "storeBackend") ?? "sqlite";
+  const storeBackendRaw = process.env.STORE_MODE ?? str(c, "storeBackend") ?? "sqlite";
+  if (!["sqlite", "tcvdb", "mongodb", "postgres"].includes(storeBackendRaw)) throw new Error("Unsupported memory store backend");
   const storeBackend: StoreBackend =
     storeBackendRaw === "tcvdb" ? "tcvdb"
     : storeBackendRaw === "mongodb" ? "mongodb"
+    : storeBackendRaw === "postgres" ? "postgres"
     : "sqlite";
 
   // --- TCVDB config ---
@@ -713,6 +716,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       configError: embeddingConfigError,
     },
     storeBackend,
+    postgres: { url: process.env.TDAI_POSTGRES_URL ?? str(obj(c, "postgres"), "url") ?? "", instanceId: process.env.TDAI_INSTANCE_ID ?? str(obj(c, "postgres"), "instanceId") ?? "default" },
     tcvdb: {
       url: str(tcvdbGroup, "url") ?? "",
       username: str(tcvdbGroup, "username") ?? "root",

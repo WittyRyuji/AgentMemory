@@ -104,7 +104,7 @@ export interface IStorageBackend {
    * (MongoFSBackend): arbitrary keys chunked into the instance's own database,
    * used as the rowfs others leg in the TCS form (zero disk dependency).
    */
-  readonly type: "local" | "cos" | "rowfs" | "mongofs";
+  readonly type: "local" | "cos" | "rowfs" | "mongofs" | "postgres";
 
   /**
    * Write an object (create or overwrite).

@@ -145,7 +145,7 @@ export async function stageSessionResetPreHook(
     resetFlow: true,
   } as unknown as Parameters<typeof store.set>[1]);
   const bindingRepo = store.getBindingRepo();
-  if (bindingRepo) await bindingRepo.deleteBinding(spaceId, sessionKey).catch(() => { /* best-effort */ });
+  if (bindingRepo) await bindingRepo.deleteBinding(spaceId, sessionKey).catch((err) => { if (bindingRepo.strictPersistence) throw err; });
   console.log(`[mem-command:pre] session-reset session=${sessionKey} → falling through to pop form`);
 
   // Note: void c 参数保留 (未来 stage 可能需要 header access), 当前不使用

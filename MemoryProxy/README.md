@@ -343,3 +343,8 @@ npm run test:watch
 ## License
 
 MIT
+
+
+## PostgreSQL persistence
+
+See [POSTGRES.md](./POSTGRES.md) for opt-in configuration, source-preserving migration, compatibility boundaries and validation. Existing storage modes remain available.

@@ -44,8 +44,7 @@ export function accessLog(): MiddlewareHandler {
       try {
         const raw = await c.req.text();
         reqBody = raw ? JSON.parse(raw) : undefined;
-        c.req.bodyCache.text = Promise.resolve(raw);
-        if (reqBody) c.req.bodyCache.json = Promise.resolve(reqBody);
+        // Hono caches text/json itself; do not overwrite its version-specific cache.
       } catch {
         // 非 JSON body，忽略
       }

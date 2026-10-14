@@ -2,7 +2,7 @@
  * Knowledge data layer barrel — metadata/status SQLite + async orchestration services.
  */
 
-export { SqliteKnowledgeStore } from "./sqlite-store.js";
+export { PostgresKnowledgeStore, PostgresKnowledgeStore as SqliteKnowledgeStore } from "./postgres-store.js";
 export type {
   IKnowledgeStore,
   SyncStatus,

@@ -1,0 +1,52 @@
+# PostgreSQL profile for the existing gateway, Panel and SDK APIs.
+# Fill the explicit embedding settings via environment; no local model downloads.
+deployMode: standalone
+instanceId: "${TDAI_INSTANCE_ID:-default}"
+stateBackend: postgres
+server:
+  host: 0.0.0.0
+  port: 8420
+  apiKey: "${TDAI_GATEWAY_API_KEY}"
+data:
+  baseDir: /data/tdai-memory
+  fileStore: rowfs
+  fileStoreOthers: postgres
+memory:
+  storeBackend: postgres
+  postgres:
+    url: "${TDAI_POSTGRES_URL}"
+  capture:
+    enabled: true
+  recall:
+    enabled: true
+    strategy: hybrid
+  embedding:
+    enabled: true
+    provider: openai
+    baseUrl: "${MEMORY_EMBEDDING_BASE_URL}"
+    apiKey: "${MEMORY_EMBEDDING_API_KEY}"
+    model: "${MEMORY_EMBEDDING_MODEL}"
+    dimensions: 1536 # Set to the provider's real output dimension before startup.
+    sendDimensions: false
+  bm25:
+    enabled: false # PG full-text remains enabled; no sparse-vector encoder needed.
+  extraction:
+    enabled: false # Enable only after explicitly configuring the existing LLM path.
+worker:
+  concurrency: 2
+skill:
+  enabled: true
+  storeBackend: postgres
+  contentBackend: postgres
+  routing:
+    mode: bm25
+  extraction:
+    enabled: false
+  worker:
+    concurrency: 2
+metadata:
+  store:
+    postgresUrl: "${TDAI_POSTGRES_URL}"
+# OpenAI OAuth is deferred. No paid-key LLM fallback is configured here.
+# To retain an existing explicitly configured LLM, copy your llm block and enable
+# memory.extraction / skill.extraction deliberately. Embedding and LLM keys differ.

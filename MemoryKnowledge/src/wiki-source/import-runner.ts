@@ -56,7 +56,7 @@ export interface WikiServiceLike {
     wikiId: string,
     providerId: string,
     map: Record<string, string>,
-  ): void;
+  ): void | Promise<void>;
 }
 
 const BATCH_SIZE = 20;
@@ -190,7 +190,7 @@ export async function runImport(p: ImportParams): Promise<ImportResult> {
 
   // 映射落盘：文件已写完，保存失败不阻断本轮结果（只影响下一轮复用）
   if (canUseMap && nameByExternalId) {
-    p.wikiService.writeImportNameMap!(
+    await p.wikiService.writeImportNameMap!(
       p.serviceId,
       p.teamId,
       p.wikiId,

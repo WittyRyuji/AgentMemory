@@ -341,7 +341,7 @@ async function _doInitStores(
       // ── Manifest: first-write + config-drift detection ──
       try {
         const currentStoreInfo = buildStoreInfo(bundle.storeSnapshot);
-        const existing = readManifest(pluginDataDir);
+        const existing = cfg.storeBackend === "postgres" ? null : readManifest(pluginDataDir);
 
         if (!existing) {
           // First init — write manifest
@@ -351,7 +351,7 @@ async function _doInitStores(
             store: currentStoreInfo,
             seed: null,
           };
-          writeManifest(pluginDataDir, manifest);
+          if (cfg.storeBackend !== "postgres") writeManifest(pluginDataDir, manifest);
           logger.debug?.(`${TAG} Manifest created: ${JSON.stringify(currentStoreInfo)}`);
         } else {
           // Compare persisted store binding against current config
@@ -369,6 +369,7 @@ async function _doInitStores(
       }
     }
   } catch (err) {
+    if (cfg.storeBackend === "postgres") throw err;
     logger.warn(
       `${TAG} Store init failed; vector/FTS recall and dedup conflict detection will be unavailable: ${err instanceof Error ? err.message : String(err)}`,
     );

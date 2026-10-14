@@ -1003,3 +1003,11 @@ pipeline:
     opencode: false
     pi: false
     claude-code: false
+# PostgreSQL authoritative storage opt-in (see POSTGRES.md):
+# Set PROXY_STORAGE_BACKEND=postgres and PROXY_POSTGRES_URL (or DATABASE_URL).
+# Alternatively amend the existing storage block:
+# storage:
+#   enabled: true
+#   backend: postgres
+#   postgres:
+#     url: ${PROXY_POSTGRES_URL}

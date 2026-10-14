@@ -5,11 +5,15 @@
 
 默认端口 **8421**，API 前缀 **`/v3`**。
 
+## PostgreSQL migration
+
+This fork stores Knowledge metadata, wiki source lifecycle/search/graph data, source/page bytes, import maps and SSH material in PostgreSQL. Set `KNOWLEDGE_POSTGRES_URL` before starting. The data directory is a working cache, and startup restores it from PG. Existing SQLite installations must use the offline importer before starting the new service. Read [POSTGRES.md](POSTGRES.md) for migration, backup, cache/recovery and search-ranking details.
+
 ## 做什么
 
 | 能力 | 说明 |
 | --- | --- |
-| **LLM-Wiki** | 上传/拉取文档 → LLM 抽取结构化页面 → FTS5 全文检索 + 知识图谱 |
+| **LLM-Wiki** | 上传/拉取文档 → LLM 抽取结构化页面 → PostgreSQL 全文检索 + 知识图谱 |
 | **Code-Graph** | `git clone` 仓库 → CodeGraph 索引（符号、调用、文件树）→ 探索查询 |
 | **Auto-Sync**（可选） | 定时扫描 code-graph，FIFO 队列 + worker pool 自动拉取 git 更新并重建索引。默认关闭，见下方「可选：Auto-Sync」。 |
 | **Tools** | `POST /v3/tools/list`、`/v3/tools/call`，供 Agent / Kernel 自发现调用 |
@@ -31,7 +35,7 @@ MemoryKnowledge/
 │   ├── engines/
 │   │   ├── wiki/           # ingest-v2、索引、图谱搜索
 │   │   └── code/           # CodeGraph bridge
-│   ├── store/              # SQLite（Drizzle）+ 构建队列 + llm_binding
+│   ├── store/              # PostgreSQL（Drizzle）+ 构建队列 + llm_binding
 │   ├── source-fetcher/     # Git 拉取
 │   ├── mcp/                # MCP stdio（转发到本机 HTTP API）
 │   ├── db/                 # schema / client
@@ -64,7 +68,7 @@ curl -s http://127.0.0.1:8421/health
 PORT=8421
 API_PREFIX=/v3
 KNOWLEDGE_DATA_DIR=./data
-KNOWLEDGE_DB_PATH=./data/knowledge.db
+KNOWLEDGE_POSTGRES_URL=postgresql://agentmemory:change-me@localhost:5432/agentmemory
 KNOWLEDGE_PUBLIC_BASE_URL=http://127.0.0.1:8421/v3   # Agent 可达，必须含 /v3
 TMC_CALLBACK_URL=http://127.0.0.1:8123               # Panel 根地址，不要带 callback path
 LLM_MODE=proxy

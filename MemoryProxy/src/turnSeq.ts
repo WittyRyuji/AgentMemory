@@ -1,3 +1,6 @@
+import { getProxyStorage } from './storage/factory.js';
+import { PostgresStorage } from './storage/postgres-storage.js';
+import { allocatePostgresTurnSeq } from './storage/postgres-turn-seq.js';
 /**
  * Turn 序号计数 —— 宿主侧无状态推导。
  *
@@ -139,6 +142,12 @@ export async function resolveMonotonicTurnSeq(
   lane = "main",
 ): Promise<number> {
   if (localTurnSeq <= 0 || !sessionKey) return localTurnSeq;
+  if (config.storage?.backend === 'postgres') {
+    const storage = getProxyStorage(config.storage);
+    if (!(storage instanceof PostgresStorage)) throw new Error('PostgreSQL turn-sequence storage unavailable');
+    const ttlDays = config.redis?.turnSeqTtlDays ?? DEFAULT_TURN_SEQ_TTL_DAYS;
+    return allocatePostgresTurnSeq(storage, sessionKey, lane, localTurnSeq, Math.max(1, Math.floor(ttlDays * 24 * 3600)));
+  }
   if (!config.redis?.enabled) return localTurnSeq;
 
   const client = getRedisClient(config.redis);

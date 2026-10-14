@@ -41,6 +41,7 @@ export interface SessionBinding {
 }
 
 export interface BindingRepo {
+  readonly strictPersistence?: boolean;
   getBinding(spaceId: string, sessionId: string): Promise<SessionBinding | null>;
   putBinding(spaceId: string, sessionId: string, binding: SessionBinding): Promise<void>;
   deleteBinding(spaceId: string, sessionId: string): Promise<void>;

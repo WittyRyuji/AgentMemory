@@ -9,6 +9,7 @@
  * `touchLastSeen` 从 Redis HSET 单字段变成本层 R-M-W;用 per-key mutex
  * 消除单节点内竞争。跨节点场景下 last_seen 可能覆盖丢失(业务可接受)。
  */
+import { PostgresStorage } from "../storage/postgres-storage.js";
 import type { BindingRepo, SessionBinding } from "./binding-repo.js";
 import type { ProxyStorage } from "../storage/proxy-storage.js";
 import { withPerKeyLock } from "../storage/per-key-mutex.js";
@@ -43,6 +44,7 @@ interface StoredBinding {
 
 export class KvBindingRepo implements BindingRepo {
   constructor(private readonly storage: ProxyStorage) {}
+  get strictPersistence(): boolean { return this.storage.type === 'postgres'; }
 
   async getBinding(spaceId: string, sessionId: string): Promise<SessionBinding | null> {
     try {
@@ -57,7 +59,8 @@ export class KvBindingRepo implements BindingRepo {
         agentSource: raw.agentSource,
         userKey: raw.userKey,
       };
-    } catch {
+    } catch (err) {
+      if (this.strictPersistence) throw err;
       return null;
     }
   }
@@ -77,6 +80,10 @@ export class KvBindingRepo implements BindingRepo {
         created_at: now,
         last_seen: now,
       };
+      if (this.storage instanceof PostgresStorage) {
+        await this.storage.putBindingRecord(key, record);
+        return;
+      }
       // Preserve `created_at` on overwrite(与 Redis HSET 语义等价:不会重置 created_at)
       const existing = await this.storage.getJSON<StoredBinding>(key).catch(() => null);
       if (existing?.created_at) record.created_at = existing.created_at;
@@ -93,13 +100,17 @@ export class KvBindingRepo implements BindingRepo {
   async deleteBinding(spaceId: string, sessionId: string): Promise<void> {
     const key = keyOf(spaceId, sessionId);
     await withPerKeyLock(lockKey(spaceId, sessionId), async () => {
-      await this.storage.del(key).catch(() => { /* silent */ });
+      await this.storage.del(key).catch((err) => { if (this.strictPersistence) throw err; });
     });
   }
 
   async touchLastSeen(spaceId: string, sessionId: string): Promise<void> {
     const key = keyOf(spaceId, sessionId);
     await withPerKeyLock(lockKey(spaceId, sessionId), async () => {
+      if (this.storage instanceof PostgresStorage) {
+        await this.storage.touchBindingRecord(key);
+        return;
+      }
       const cur = await this.storage.getJSON<StoredBinding>(key).catch(() => null);
       if (!cur) return;
       cur.last_seen = Date.now();

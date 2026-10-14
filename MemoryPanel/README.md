@@ -139,3 +139,8 @@ Control 的公开入口统一位于 `/api/v1`：
 - Knowledge API：`docs/api/knowledge-panel-api.md`
 - Chat Memory API：`docs/api/chat-memory.md`
 - Docker：`docker/README.md`
+
+
+## PostgreSQL persistence
+
+See [POSTGRES.md](./POSTGRES.md) for opt-in configuration, source-preserving migration, compatibility boundaries and validation. Existing storage modes remain available.

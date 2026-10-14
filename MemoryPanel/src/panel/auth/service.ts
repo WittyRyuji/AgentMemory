@@ -4,7 +4,7 @@ import type { PanelAuthConfig } from '../config/panel-config.js';
 import { InstanceRegistry } from '../config/instance-registry.js';
 import type { MetaKernelPort } from '../kernel/ports/meta-kernel-port.js';
 import type { MetaCallContext } from '../kernel/types.js';
-import { FileIdentityStore, decryptSecret, encryptSecret } from './identity-store.js';
+import { FileIdentityStore, type IdentityStore, decryptSecret, encryptSecret } from './identity-store.js';
 import { MemorySessionStore, type IdpSession, type SessionUser } from './session-store.js';
 import { AuthProviderRegistry } from './provider-registry.js';
 import { WoaProvider } from './woa-provider.js';
@@ -97,6 +97,7 @@ interface PendingWoaPayload {
 
 interface PanelAuthDependencies {
   config: PanelAuthConfig;
+  identities?: IdentityStore;
   instances: InstanceRegistry;
   metaKernel: MetaKernelPort;
   logger: Logger;
@@ -108,7 +109,7 @@ export class PanelAuthService {
   private readonly metaKernel: MetaKernelPort;
   private readonly logger: Logger;
   private readonly sessions: MemorySessionStore;
-  private readonly identities: FileIdentityStore;
+  private readonly identities: IdentityStore;
   private readonly providers = new AuthProviderRegistry();
   private readonly consumedPendingWoa = new Set<string>();
 
@@ -127,7 +128,7 @@ export class PanelAuthService {
       throw new Error('session secret is unavailable: internal generation or persistence failed');
     }
     this.sessions = new MemorySessionStore(config.sessionTtlSeconds);
-    this.identities = new FileIdentityStore(config.identityStorePath);
+    this.identities = dependencies.identities ?? new FileIdentityStore(config.identityStorePath);
     // Provider 统一走 registry：删除历史上的私有 `this.woa` 字段。
     // 将来接第二个 Provider（OAuth2/OIDC）时，只需在这里新增 `providers.register(...)`，
     // 不需要在 Service 上再增加同名字段。
@@ -493,7 +494,7 @@ export class PanelAuthService {
     const context = this.context(entry, userKey, requestId);
     const verified = await this.metaKernel.invoke('auth/verify', { user_key: userKey }, context);
     const user = this.readVerifiedUser(verified);
-    this.saveIdentityBinding(instanceId, identity, user.user_id, userKey);
+    await this.saveIdentityBinding(instanceId, identity, user.user_id, userKey);
     return { coreUserId: user.user_id, identity };
   }
 
@@ -515,7 +516,7 @@ export class PanelAuthService {
     identity: ExternalIdentity,
     requestId?: string,
   ): Promise<{ coreUserId: string; userKey: string; user: SessionUser }> {
-    const existing = this.identities.find(instanceId, identity.providerId, identity.subject);
+    const existing = await this.identities.find(instanceId, identity.providerId, identity.subject);
     if (existing) {
       let userKey: string;
       try {
@@ -599,8 +600,9 @@ export class PanelAuthService {
     // 回写本地绑定缓存：下次登录直接命中本地路径，无需再打 Core。
     // 回写失败（卷只读 / 磁盘满）不阻断本次登录——下次仍可经 Core 反查兜底。
     try {
-      this.saveIdentityBinding(instanceId, identity, coreUserId, userKey);
+      await this.saveIdentityBinding(instanceId, identity, coreUserId, userKey);
     } catch (err) {
+      if (this.identities.strictPersistence) throw err;
       this.logger.warn('WOA identity binding cache write failed (non-fatal)', {
         instanceId, coreUserId, err: err instanceof Error ? err.message : String(err),
       });
@@ -688,7 +690,7 @@ export class PanelAuthService {
     // 幂等兜底：并发/重复提交时可能在前一次建号写盘前再次进入，
     // 此前靠"user_id = 登录名"的唯一约束挡住重复建号；改为内核生成 usr-xxx 后
     // 该约束消失，必须在建号前显式检查绑定是否已经存在。
-    const alreadyBound = this.identities.find(instanceId, identity.providerId, identity.subject);
+    const alreadyBound = await this.identities.find(instanceId, identity.providerId, identity.subject);
     if (alreadyBound) return this.resolveIdentity(instanceId, identity, requestId);
     // WOA 建号：username 默认取 WOA 登录名（可在确认页修改），与 user_id 解耦。
     // user_id **不**使用登录名，交给内核按 admin「新建并绑定账号」同一套逻辑生成 usr-xxx，
@@ -775,7 +777,7 @@ export class PanelAuthService {
         throw new PanelAuthError('WOA_TEAM_PROVISION_FAILED', added.message || 'failed to add WOA user to team', 502);
       }
     }
-    this.identities.save({
+    await this.identities.save({
       instanceId,
       providerId: identity.providerId,
       externalSubject: identity.subject,
@@ -794,10 +796,10 @@ export class PanelAuthService {
     return { coreUserId: result.user_id, userKey: result.default_user_key, user: verified.user };
   }
 
-  private saveIdentityBinding(
+  private async saveIdentityBinding(
     ...[instanceId, identity, coreUserId, userKey]: [string, ExternalIdentity, string, string]
-  ): void {
-    this.identities.save({
+  ): Promise<void> {
+    await this.identities.save({
       instanceId,
       providerId: identity.providerId,
       externalSubject: identity.subject,

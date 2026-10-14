@@ -12,6 +12,12 @@ export interface IdentityBinding {
   updatedAt: string;
 }
 
+export interface IdentityStore {
+  readonly strictPersistence?: boolean;
+  find(instanceId: string, providerId: string, externalSubject: string): IdentityBinding | null | Promise<IdentityBinding | null>;
+  save(binding: IdentityBinding): void | Promise<void>;
+}
+
 interface IdentityFile {
   version: 1;
   bindings: IdentityBinding[];
@@ -40,7 +46,7 @@ export function decryptSecret(value: string, secret: string): string {
   ]).toString('utf8');
 }
 
-export class FileIdentityStore {
+export class FileIdentityStore implements IdentityStore {
   private readonly bindings = new Map<string, IdentityBinding>();
 
   constructor(private readonly filePath: string) {

@@ -63,6 +63,7 @@ export class LocalBackendResolver implements BackendResolver {
     const kind: DbKind =
       this.deps.storeMode ?? (this.deps.deployMode === "service" ? "tcvdb" : "sqlite");
     switch (kind) {
+      case "postgres":
       case "sqlite":
         return { kind, conn: null };
       case "tcvdb":
@@ -91,6 +92,8 @@ export class LocalBackendResolver implements BackendResolver {
         switch (othersKind) {
           case "local":
             return { profile: "rows", others: { kind: "local", conn: null } };
+          case "postgres":
+            return { profile: "rows", others: { kind: "postgres", conn: null } };
           case "mongofs":
             return { profile: "rows", others: { kind: "mongofs", conn: null } };
           case "cos":

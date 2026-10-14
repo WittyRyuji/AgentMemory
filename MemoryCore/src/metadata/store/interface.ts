@@ -300,6 +300,6 @@ export interface IMetadataStore {
 }
 
 /** 后端类型。 */
-export type MetadataBackend = "sqlite" | "mongodb" | "mysql";
+export type MetadataBackend = "sqlite" | "mongodb" | "mysql" | "postgres";
 
 export type { TeamRole };

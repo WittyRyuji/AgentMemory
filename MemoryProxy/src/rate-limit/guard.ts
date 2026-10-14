@@ -1,3 +1,6 @@
+import { PostgresRateLimitStore } from "./postgres-store.js";
+import { PostgresStorage } from "../storage/postgres-storage.js";
+import { getProxyStorage } from "../storage/factory.js";
 import type { ProxyConfig } from "../types.js";
 import { getRedisClient } from "../db/redis-client.js";
 import { log } from "../report/log.js";
@@ -13,11 +16,18 @@ export class RateLimitExceededError extends Error {
   }
 }
 
-let store: RedisRateLimitStore | null = null;
+type RateLimitStore = RedisRateLimitStore | PostgresRateLimitStore;
+let store: RateLimitStore | null = null;
 let lastDegradedWarningAt = 0;
 
-export function getRateLimitStore(config: ProxyConfig): RedisRateLimitStore {
+export function getRateLimitStore(config: ProxyConfig): RateLimitStore {
   if (!store) {
+    if (config.storage?.backend === 'postgres') {
+      const storage = getProxyStorage(config.storage);
+      if (!(storage instanceof PostgresStorage)) throw new Error('PostgreSQL rate-limit storage unavailable');
+      store = new PostgresRateLimitStore(storage, config.rateLimit);
+      return store;
+    }
     store = new RedisRateLimitStore(
       getRedisClient(config.redis),
       config.rateLimit,
@@ -133,6 +143,6 @@ export function __resetRateLimitStoreForTests(): void {
 }
 
 /** Test-only injection hook. */
-export function __setRateLimitStoreForTests(testStore: RedisRateLimitStore): void {
+export function __setRateLimitStoreForTests(testStore: RateLimitStore): void {
   store = testStore;
 }

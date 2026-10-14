@@ -1,64 +1,21 @@
-/**
- * Drizzle client initialization — creates better-sqlite3 Database + drizzle wrapper.
- *
- * Synchronous driver, matches existing store call patterns.
- */
-
-import Database from "better-sqlite3";
-import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
-
+/** PostgreSQL is the durable system of record for Knowledge. */
+import pg from "pg";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import {
+  WIKI_INDEX_SCHEMA_SQL,
+  configureWikiIndexPool,
+} from "../engines/wiki/index-db.js";
+import { ARTIFACT_SCHEMA_SQL } from "./artifact-store.js";
 import * as schema from "./schema.js";
 
-export type Db = BetterSQLite3Database<typeof schema>;
-
+export type Db = NodePgDatabase<typeof schema>;
 export interface CreateDbOptions {
-  /** Path to SQLite file. Use ":memory:" for in-memory DB. */
-  path: string;
-  /** Whether to run migrations (CREATE TABLE IF NOT EXISTS) on init. Default true. */
+  connectionString: string;
   autoMigrate?: boolean;
+  /** Test seam; production uses a bounded node-postgres connection pool. */
+  pool?: pg.Pool;
 }
-
-/**
- * Create a Drizzle-wrapped better-sqlite3 database.
- * Sets WAL mode + busy_timeout for production safety.
- */
-export function createDb(opts: CreateDbOptions): { db: Db; raw: Database.Database } {
-  if (opts.path !== ":memory:") {
-    mkdirSync(dirname(opts.path), { recursive: true });
-  }
-
-  const raw = new Database(opts.path);
-  raw.pragma("journal_mode = WAL");
-  raw.pragma("busy_timeout = 5000");
-
-  const db = drizzle(raw, { schema });
-
-  if (opts.autoMigrate !== false) {
-    migrate(db, raw);
-  }
-
-  return { db, raw };
-}
-
-/**
- * Run idempotent CREATE TABLE IF NOT EXISTS for all 4 tables + indexes.
- * Uses raw SQL for partial unique indexes (Drizzle schema definition generates them
- * via drizzle-kit, but for runtime we ensure tables exist).
- */
-export function migrate(_db: Db, raw: Database.Database): void {
-  // 前置：把老 user-scoped 凭据表清掉（新结构无法 IF NOT EXISTS 上位）。
-  // 判据：resource_id 列缺失 = 老结构，DROP 后由下方 CREATE 重建。
-  // 该能力尚未发布，无真实存量凭据。
-  if (
-    tableExists(raw, "knowledge_source_credential") &&
-    !hasColumn(raw, "knowledge_source_credential", "resource_id")
-  ) {
-    raw.exec("DROP TABLE knowledge_source_credential");
-  }
-
-  raw.exec(`
+export const KNOWLEDGE_SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS knowledge_code_graph (
       code_graph_id   TEXT PRIMARY KEY,
       service_id      TEXT NOT NULL,
@@ -121,7 +78,7 @@ export function migrate(_db: Db, raw: Database.Database): void {
       ON knowledge_wiki(service_id, team_id, status);
 
     CREATE TABLE IF NOT EXISTS knowledge_wiki_audit (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      id         SERIAL PRIMARY KEY,
       wiki_id    TEXT NOT NULL,
       service_id TEXT,
       version    INTEGER NOT NULL DEFAULT 0,
@@ -136,7 +93,7 @@ export function migrate(_db: Db, raw: Database.Database): void {
       ON knowledge_wiki_audit(wiki_id, version DESC);
 
     CREATE TABLE IF NOT EXISTS knowledge_code_graph_audit (
-      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      id            SERIAL PRIMARY KEY,
       code_graph_id TEXT NOT NULL,
       service_id    TEXT,
       version       INTEGER NOT NULL DEFAULT 0,
@@ -179,40 +136,84 @@ export function migrate(_db: Db, raw: Database.Database): void {
       enabled        INTEGER NOT NULL DEFAULT 1,
       updated_at     TEXT NOT NULL
     );
-  `);
 
-  // Column migrations — SQLite ALTER TABLE ADD COLUMN is not idempotent,
-  // so we check PRAGMA table_info first.
-  addColumnIfMissing(raw, "knowledge_code_graph", "service_url", "TEXT");
-  addColumnIfMissing(raw, "knowledge_code_graph", "summary", "TEXT");
-  addColumnIfMissing(raw, "knowledge_wiki", "service_url", "TEXT");
-  addColumnIfMissing(raw, "knowledge_wiki", "summary", "TEXT");
-  // service_id on audit tables is nullable → safe to add to existing dev DBs.
-  addColumnIfMissing(raw, "knowledge_wiki_audit", "service_id", "TEXT");
-  addColumnIfMissing(raw, "knowledge_code_graph_audit", "service_id", "TEXT");
+ALTER TABLE knowledge_code_graph ADD COLUMN IF NOT EXISTS service_url TEXT;
+ALTER TABLE knowledge_code_graph ADD COLUMN IF NOT EXISTS summary TEXT;
+ALTER TABLE knowledge_wiki ADD COLUMN IF NOT EXISTS service_url TEXT;
+ALTER TABLE knowledge_wiki ADD COLUMN IF NOT EXISTS summary TEXT;
+`;
+
+export async function createDb(
+  opts: CreateDbOptions,
+): Promise<{ db: Db; raw: pg.Pool }> {
+  if (!opts.pool && !/^postgres(?:ql)?:\/\//.test(opts.connectionString)) {
+    throw new Error(
+      "KNOWLEDGE_POSTGRES_URL must be a PostgreSQL connection URL",
+    );
+  }
+  const raw =
+    opts.pool ??
+    new pg.Pool({
+      connectionString: opts.connectionString,
+      max: 5,
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 30_000,
+    });
+  raw.on("error", () => {
+    /* Connection failures surface on the next operation; never log secrets. */
+  });
+  const db = drizzle(raw, { schema });
+  try {
+    if (opts.autoMigrate !== false) await migrate(db, raw);
+    configureWikiIndexPool(raw);
+    return { db, raw };
+  } catch (error) {
+    if (!opts.pool) await raw.end();
+    throw error;
+  }
 }
 
-/** True iff the given table exists in the DB. */
-function tableExists(raw: Database.Database, table: string): boolean {
-  const row = raw
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
-    .get(table);
-  return !!row;
+export async function migrate(_db: Db, raw: pg.Pool): Promise<void> {
+  const client = await raw.connect();
+  try {
+    await client.query("BEGIN");
+    // Serialize concurrent process startups without dropping or recreating user data.
+    await client.query("SELECT pg_advisory_xact_lock(734819230)");
+    await client.query(KNOWLEDGE_SCHEMA_SQL);
+    await client.query(WIKI_INDEX_SCHEMA_SQL);
+    await client.query(ARTIFACT_SCHEMA_SQL);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
-/** Add a column to a table if it doesn't already exist. SQLite-safe. */
-function addColumnIfMissing(
-  raw: Database.Database,
-  table: string,
-  column: string,
-  type: string,
-): void {
-  if (hasColumn(raw, table, column)) return;
-  raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type};`);
-}
-
-/** True iff the given column exists on the table (SQLite PRAGMA-based). */
-function hasColumn(raw: Database.Database, table: string, column: string): boolean {
-  const cols = raw.pragma(`table_info(${table})`) as Array<{ name: string }>;
-  return cols.some((c) => c.name === column);
+/** The existing in-memory build queue/cache supports one writer per database. */
+export async function acquireKnowledgeLease(
+  pool: pg.Pool,
+): Promise<() => Promise<void>> {
+  const client = await pool.connect();
+  const result = await client.query<{ acquired: boolean }>(
+    "SELECT pg_try_advisory_lock(734819231) AS acquired",
+  );
+  if (!result.rows[0]?.acquired) {
+    client.release();
+    throw new Error(
+      "Another Knowledge process owns this database; concurrent writers are not supported",
+    );
+  }
+  // Losing the lease must stop writes immediately, rather than let two caches diverge.
+  client.on("error", () => {
+    process.exit(1);
+  });
+  return async () => {
+    try {
+      await client.query("SELECT pg_advisory_unlock(734819231)");
+    } finally {
+      client.release();
+    }
+  };
 }

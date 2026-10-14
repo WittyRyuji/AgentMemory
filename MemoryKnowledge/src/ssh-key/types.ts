@@ -22,6 +22,8 @@ export interface SshKeyInfo {
 }
 
 export interface ISshKeyStore {
+  /** Persist changes to SSH known_hosts after a fetch. */
+  checkpoint?(serviceId: string): Promise<void>;
   /**
    * 取（必要时生成）该用户在当前 service 下的密钥对。
    *

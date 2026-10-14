@@ -4,9 +4,11 @@ import { buildPanelApp } from './http/app.js';
 import { buildPanelDeps } from './panel-deps.js';
 import { ensureKnowledgeLlmBindings } from './startup/ensure-knowledge-llm-binding.js';
 
-export function main(): void {
+export async function main(): Promise<void> {
   const config = loadPanelConfig();
   const deps = buildPanelDeps(config);
+  // Fail startup before listening if the authoritative database is unavailable.
+  await deps.postgresState?.initialize();
   const app = buildPanelApp(deps);
 
   serve(
@@ -46,6 +48,7 @@ export function main(): void {
   const shutdown = async (): Promise<void> => {
     deps.logger.info('panel shutting down');
     await deps.apiCallTelemetry.shutdown();
+    await deps.postgresState?.close();
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown());

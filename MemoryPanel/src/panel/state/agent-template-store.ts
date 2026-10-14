@@ -57,3 +57,19 @@ export function getAgentTemplate(
     throw err;
   }
 }
+
+
+export interface AgentTemplateStore {
+  get(instanceId: string, teamId: string): AgentTemplateConfig | null | Promise<AgentTemplateConfig | null>;
+  save(instanceId: string, teamId: string, config: AgentTemplateConfig): void | Promise<void>;
+}
+
+export class FileAgentTemplateStore implements AgentTemplateStore {
+  constructor(private readonly dir: string) {}
+  get(instanceId: string, teamId: string): AgentTemplateConfig | null {
+    return getAgentTemplate(this.dir, instanceId, teamId);
+  }
+  save(instanceId: string, teamId: string, config: AgentTemplateConfig): void {
+    saveAgentTemplate(this.dir, instanceId, teamId, config);
+  }
+}

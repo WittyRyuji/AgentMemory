@@ -76,6 +76,7 @@ export async function executeSessionReset(ctx: MemCommandContext): Promise<MemCo
     try {
       await bindingRepo.deleteBinding(ctx.spaceId, ctx.sessionKey);
     } catch (err) {
+      if (bindingRepo.strictPersistence) throw err;
       console.warn(
         `[mem-command:session-reset] deleteBinding failed for ${compositeKey}: ` +
           (err instanceof Error ? err.message : String(err)),

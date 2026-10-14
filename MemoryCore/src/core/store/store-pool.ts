@@ -24,6 +24,11 @@ import { createEmbeddingService, NoopEmbeddingService } from "./embedding.js";
 import { VectorStore } from "./sqlite/memory-store.js";
 import { TcvdbMemoryStore } from "./tcvdb/memory-store.js";
 import { TcvdbSkillStore } from "./tcvdb/skill-store.js";
+import { Pool as PgPool } from "pg";
+import { PostgresDatabase, instanceSchema, type PgPool as PgPoolContract } from "./postgres/client.js";
+import { PostgresMemoryStore } from "./postgres/memory-store.js";
+import { PostgresSkillStore } from "./postgres/skill-store.js";
+import { createPostgresEmbedding } from "./factory.js";
 import { MongoMemoryStore } from "./mongodb/memory-store.js";
 import { MongoSkillStore } from "./mongodb/skill-store.js";
 import { getSharedMongoClientPool } from "./mongodb/client-pool.js";
@@ -60,7 +65,7 @@ interface Logger {
   error: (message: string) => void;
 }
 
-export type StoreMode = "sqlite" | "tcvdb" | "mongodb";
+export type StoreMode = "sqlite" | "tcvdb" | "mongodb" | "postgres";
 
 export interface KafkaMetricOptions {
   /** Kafka Broker 列表 (逗号分隔或数组) */
@@ -101,6 +106,7 @@ export class StorePool {
   /** 全局共享的 BM25 编码器 (避免重复加载 jieba 词典导致 OOM) */
   private sharedBm25Encoder: BM25LocalEncoder | undefined;
   /** 共享 MongoClient 连接池 (mongodb 后端；按 endpoint 复用一个 client)。 */
+  private postgresPool?: PgPool;
   private mongoPool: MongoClientPool | undefined;
 
   /** Skill store 缓存上限 */
@@ -184,18 +190,20 @@ export class StorePool {
     // mongoConfig present → mongodb; else tcvdb when in tcvdb mode with a vdb;
     // else sqlite. `mode` is the process default that drives which config the
     // caller resolves, but the presence check is authoritative here.
-    const backend: StoreMode = mongoConfig
+    const backend: StoreMode = this.mode === "postgres" ? "postgres" : mongoConfig
       ? "mongodb"
       : (this.mode === "tcvdb" && vdbConfig ? "tcvdb" : "sqlite");
     const fingerprint =
       backend === "mongodb" && mongoConfig ? this.computeMongoFingerprint(mongoConfig)
       : backend === "tcvdb" && vdbConfig ? this.computeFingerprint(vdbConfig)
-      : `sqlite:${instanceId}`;
+      : backend === "postgres" ? `postgres:${instanceId}` : `sqlite:${instanceId}`;
     const cached = this.pool.get(instanceId);
 
     // 命中且配置未变
     if (cached && cached.configFingerprint === fingerprint) {
       cached.lastAccessedAt = now;
+      // A concurrent first request must not observe a cached but uninitialized PG store.
+      if (backend === "postgres") await cached.pooledStore.store.init(cached.pooledStore.embedding.getProviderInfo());
       return cached.pooledStore;
     }
 
@@ -214,7 +222,7 @@ export class StorePool {
     const pooledStore =
       backend === "mongodb" && mongoConfig ? this.createMongoStore(mongoConfig)
       : backend === "tcvdb" && vdbConfig ? this.createTcvdbStore(vdbConfig)
-      : this.createSqliteStore(instanceId);
+      : backend === "postgres" ? { store: new PostgresMemoryStore({ db: this.getPostgresDatabase(instanceId), dimensions: this.memoryCfg.embedding.dimensions }), embedding: createPostgresEmbedding(this.memoryCfg, this.logger as StoreLogger) } : this.createSqliteStore(instanceId);
 
     this.pool.set(instanceId, {
       pooledStore,
@@ -225,15 +233,16 @@ export class StorePool {
     const storeDesc =
       backend === "mongodb" && mongoConfig ? `mongodb ${mongoConfig.endpoint} / ${mongoConfig.database}`
       : backend === "tcvdb" && vdbConfig ? `${vdbConfig.url} / ${vdbConfig.database}`
-      : `sqlite @ ${this.getSqlitePath(instanceId)}`;
+      : backend === "postgres" ? instanceSchema(instanceId) : `sqlite @ ${this.getSqlitePath(instanceId)}`;
     this.logger.info(
       `${TAG} Created ${backend} store for ${instanceId}: ${storeDesc} (pool size: ${this.pool.size})`,
     );
 
     // 初始化 Store (建表/检查连接)
     try {
-      await pooledStore.store.init();
+      await pooledStore.store.init(pooledStore.embedding?.getProviderInfo());
     } catch (e) {
+      if (backend === "postgres") { this.pool.delete(instanceId); pooledStore.store.close(); throw e; }
       this.logger.warn(`${TAG} Store init failed for ${instanceId}: ${e}`);
     }
 
@@ -294,6 +303,7 @@ export class StorePool {
       this.mongoPool = undefined;
     }
 
+    if (this.postgresPool) { await this.postgresPool.end(); this.postgresPool = undefined; }
     this.logger.info(`${TAG} All stores closed (${entries.length} memory + skill caches cleared)`);
   }
 
@@ -350,6 +360,13 @@ export class StorePool {
       this.evictSkillStoreLru();
     }
 
+    if (this.mode === "postgres") {
+      const store = new PostgresSkillStore(this.getPostgresDatabase(instanceId), createPostgresEmbedding(this.memoryCfg, this.logger as StoreLogger));
+      await store.initialize();
+      this.skillStoreCache.set(key, store);
+      this.skillStoreAccessTimes.set(key, Date.now());
+      return store;
+    }
     if (mongoConfig) {
       const mongoStore = new MongoSkillStore({
         pool: this.getMongoPool(),
@@ -452,6 +469,15 @@ export class StorePool {
   // Internal — SQLite Store
   // ════════════════════════════════════════════════════════
 
+  getPostgresDatabase(instanceId: string): PostgresDatabase {
+    if (this.mode !== "postgres") throw new Error("PostgreSQL database requested from a different backend");
+    if (!this.postgresPool) {
+      if (!this.memoryCfg.postgres.url) throw new Error("TDAI_POSTGRES_URL is required");
+      this.postgresPool = new PgPool({ connectionString: this.memoryCfg.postgres.url, max: 4, connectionTimeoutMillis: 10_000 });
+      this.postgresPool.on("error", () => {});
+    }
+    return new PostgresDatabase(this.postgresPool as unknown as PgPoolContract, instanceSchema(instanceId));
+  }
   private createSqliteStore(instanceId: string): PooledStore {
     // Embedding service (远端 API, 如 OpenAI text-embedding)
     let embeddingService: EmbeddingService | undefined;

@@ -1,3 +1,5 @@
+import { FileAgentTemplateStore, type AgentTemplateStore } from './state/agent-template-store.js';
+import { openPostgresPanelStore, type PostgresPanelStore } from './state/postgres-store.js';
 import type { InstanceEntry } from './config/instance-registry.js';
 import type { PanelConfig } from './config/panel-config.js';
 import { InstanceRegistry } from './config/instance-registry.js';
@@ -22,6 +24,8 @@ import { PanelAuthService } from './auth/service.js';
 import { PanelUserIdResolver } from './infra/user-id-resolver.js';
 
 export interface PanelDeps {
+  agentTemplates?: AgentTemplateStore;
+  postgresState?: PostgresPanelStore;
   config: PanelConfig;
   logger: Logger;
   instanceRegistry: InstanceRegistry;
@@ -86,8 +90,12 @@ export function buildPanelDeps(config: PanelConfig): PanelDeps {
     instanceCtxProvider,
   );
   const userIdResolver = new PanelUserIdResolver(metaKernel, logger);
-  const auth = new PanelAuthService({ config: config.auth, instances: instanceRegistry, metaKernel, logger });
+  const postgresState = config.state?.backend === 'postgres' ? openPostgresPanelStore(config.state.postgresUrl) : undefined;
+  const agentTemplates = postgresState?.templates ?? new FileAgentTemplateStore(config.agentTemplateDir);
+  const auth = new PanelAuthService({ config: config.auth, instances: instanceRegistry, metaKernel, logger, identities: postgresState?.identities });
   return {
+    agentTemplates,
+    postgresState,
     config,
     logger,
     instanceRegistry,

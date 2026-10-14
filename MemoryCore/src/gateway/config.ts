@@ -59,7 +59,7 @@ export type FileStoreMode = "local" | "cos" | "rowfs";
  * Mongo database (the TCS zero-disk form) and is only legal with
  * STORE_MODE=mongodb — validated by the selection layer, not here.
  */
-export type FileStoreOthersMode = "local" | "cos" | "mongofs";
+export type FileStoreOthersMode = "local" | "cos" | "mongofs" | "postgres";
 
 /**
  * Resolve the P9 kill switch (`TDAI_BACKEND_RESOLVER` / `features.backendResolver`).
@@ -368,7 +368,7 @@ export interface GatewayConfig {
   // ── Service-mode config (also settable via env vars, env takes priority) ──
 
   /** State backend type. env: STATE_BACKEND. yaml: stateBackend */
-  stateBackend?: "redis" | "local";
+  stateBackend?: "redis" | "local" | "postgres";
   /** Default instance ID for standalone pipeline. env: TDAI_INSTANCE_ID. yaml: instanceId */
   instanceId: string;
   redis: RedisConfig;
@@ -447,6 +447,7 @@ export interface GatewayConfig {
 export interface GatewayMetadataStoreConfig {
   sqliteBaseDir?: string;
   mongoUri?: string;
+  postgresUrl?: string;
   mongoTransactions?: boolean;
   storeCacheMaxInstances?: number;
   /** 元数据库名前缀，默认 tdai_metadata；库名 {prefix}_{instance_id} */
@@ -554,9 +555,9 @@ export function resolveFileStoreOthersMode(
   deployMode: DeployMode,
 ): FileStoreOthersMode {
   if (raw === undefined) return deployMode === "service" ? "cos" : "local";
-  if (raw === "local" || raw === "cos" || raw === "mongofs") return raw;
+  if (raw === "local" || raw === "cos" || raw === "mongofs" || raw === "postgres") return raw;
   throw new Error(
-    `invalid FILE_STORE_OTHERS/data.fileStoreOthers: ${JSON.stringify(raw)} (expected "local" | "cos" | "mongofs")`,
+    `invalid FILE_STORE_OTHERS/data.fileStoreOthers: ${JSON.stringify(raw)} (expected "local" | "cos" | "mongofs" | "postgres")`,
   );
 }
 
@@ -667,6 +668,7 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
   if (!str(memoryCompatRaw, "promptMode") && topLevelPromptMode) {
     memoryCompatRaw.promptMode = topLevelPromptMode;
   }
+  memoryCompatRaw.postgres = { ...obj(memoryCompatRaw, "postgres"), instanceId: env("TDAI_INSTANCE_ID") ?? str(fileConfig, "instanceId") ?? "default" };
   const memory = parseMemoryConfig(memoryCompatRaw);
 
   // ── Standalone LLM override pass-through to MemoryTdaiConfig.llm ──
@@ -767,7 +769,7 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
 
   // State backend (env > yaml > auto from deployMode)
   const rawBackend = env("STATE_BACKEND") ?? str(fileConfig, "stateBackend");
-  const stateBackend = rawBackend === "redis" || rawBackend === "local" ? rawBackend : undefined;
+  const stateBackend = rawBackend === "redis" || rawBackend === "local" || rawBackend === "postgres" ? rawBackend : (memory.storeBackend === "postgres" ? "postgres" : undefined);
 
   // Instance ID: service mode requires explicit instanceId from request headers (x-tdai-service-id),
   // standalone mode uses configured or defaults to "default".
@@ -905,12 +907,13 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
   const systemUserYaml = obj(metadataConfig, "systemUser");
   const memorySystemUserYaml = obj(systemUserYaml, "memory");
   const metadataStore: GatewayMetadataStoreConfig | undefined =
-    str(storeYaml, "sqliteBaseDir") || str(storeYaml, "mongoUri") ||
+    str(storeYaml, "sqliteBaseDir") || str(storeYaml, "mongoUri") || str(storeYaml, "postgresUrl") ||
     str(storeYaml, "mongoDbPrefix") ||
     bool(storeYaml, "mongoTransactions") !== undefined || num(storeYaml, "storeCacheMaxInstances") !== undefined
       ? {
           sqliteBaseDir: str(storeYaml, "sqliteBaseDir"),
           mongoUri: str(storeYaml, "mongoUri"),
+          postgresUrl: str(storeYaml, "postgresUrl"),
           mongoTransactions: bool(storeYaml, "mongoTransactions") ?? true,
           storeCacheMaxInstances: num(storeYaml, "storeCacheMaxInstances"),
           mongoDbPrefix: str(storeYaml, "mongoDbPrefix"),

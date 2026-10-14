@@ -1,3 +1,6 @@
+import { AssetMutex } from "./asset-mutex.js";
+import { redactLogText } from "../logger.js";
+import type { PostgresArtifactStore } from "../db/artifact-store.js";
 /**
  * WikiService — wiki 资产的异步编排（与 CodeGraphService 对称）。
  *
@@ -50,7 +53,7 @@ export interface WikiBuildContext {
   teamId: string;
   name: string;
   dir: string;
-  setInternalStatus: (s: string) => void;
+  setInternalStatus: (s: string) => Promise<void>;
   /** 单次 ingest 代际；进度/终态 callback 共用，防 Panel 迟到包 */
   ingestRunId: string;
 }
@@ -59,7 +62,9 @@ export interface WikiBuildResult {
   pageCount?: number;
 }
 
-export type WikiWorker = (ctx: WikiBuildContext) => Promise<WikiBuildResult | void>;
+export type WikiWorker = (
+  ctx: WikiBuildContext,
+) => Promise<WikiBuildResult | void>;
 
 /**
  * ingest 结果（判别联合）：
@@ -93,6 +98,7 @@ export interface WikiServiceLogger {
 }
 
 export interface WikiServiceOptions {
+  artifactStore?: PostgresArtifactStore;
   store: IKnowledgeStore;
   dataRoot: string;
   worker: WikiWorker;
@@ -102,7 +108,9 @@ export interface WikiServiceOptions {
   callbackConfig?: {
     tmcCallbackUrl: string;
     /** Per-instance LLM resolver for summary generation (keyed by service_id). */
-    resolveLlm: (serviceId: string) => import("../config.js").LlmConfig;
+    resolveLlm: (
+      serviceId: string,
+    ) => Promise<import("../config.js").LlmConfig>;
   };
 }
 
@@ -205,12 +213,7 @@ export interface PageRmResult {
  * - 否则：实际结果对象
  */
 export type WriteOutcome<T> =
-  | T
-  | null
-  | "processing"
-  | "invalid_path"
-  | "forbidden_path"
-  | "too_large";
+  T | null | "processing" | "invalid_path" | "forbidden_path" | "too_large";
 
 const PAGE_WRITE_MAX_BYTES = 512 * 1024;
 const RAW_WRITE_MAX_BYTES = 5 * 1024 * 1024;
@@ -232,6 +235,8 @@ const PAGE_FORBIDDEN_REFS = new Set([
 ]);
 
 export class WikiService {
+  private readonly admissions = new AssetMutex();
+  private readonly artifactStore?: PostgresArtifactStore;
   private readonly store: IKnowledgeStore;
   private readonly dataRoot: string;
   private readonly worker: WikiWorker;
@@ -239,7 +244,9 @@ export class WikiService {
   private readonly logger?: WikiServiceLogger;
   private readonly callbackConfig?: {
     tmcCallbackUrl: string;
-    resolveLlm: (serviceId: string) => import("../config.js").LlmConfig;
+    resolveLlm: (
+      serviceId: string,
+    ) => Promise<import("../config.js").LlmConfig>;
   };
   /**
    * 中止标记（代际化，设计 2026-09-21 §3.3）。
@@ -265,6 +272,7 @@ export class WikiService {
   private static readonly CANCEL_ALL_VERSIONS = -1;
 
   constructor(opts: WikiServiceOptions) {
+    this.artifactStore = opts.artifactStore;
     this.store = opts.store;
     this.dataRoot = opts.dataRoot;
     this.worker = opts.worker;
@@ -281,31 +289,51 @@ export class WikiService {
    * 创建 wiki 元数据 + 目录壳。**不自动 ingest**。
    * 幂等：同 (service_id, team_id, name) 返回已有行。
    */
-  create(params: CreateWikiParams): { row: WikiRow; existed: boolean } {
-    const { row, existed } = this.store.createWiki(params);
+  async create(
+    params: CreateWikiParams,
+  ): Promise<{ row: WikiRow; existed: boolean }> {
+    const { row, existed } = await this.store.createWiki(params);
     if (!existed) {
       const dir = this.dirFor(row.service_id, row.team_id, row.wiki_id);
       mkdirSync(join(dir, "raw", "sources"), { recursive: true });
       // 显式建 index.db（4 表，含 source）——此后 rawWrite/rawLs 直接读写 source 表（设计 006/003）。
       try {
-        initIndexDb(dir);
+        await initIndexDb(dir);
       } catch (err) {
-        this.logger?.warn?.(`[wiki] initIndexDb failed for ${row.wiki_id}: ${String(err)}`);
+        this.logger?.warn?.(
+          `[wiki] initIndexDb failed for ${row.wiki_id}: ${String(err)}`,
+        );
       }
-      this.audit(row, "create", `create wiki ${row.name}`, params.user_id);
+      await this.artifactStore?.checkpoint(dir);
+      await this.audit(
+        row,
+        "create",
+        `create wiki ${row.name}`,
+        params.user_id,
+      );
     }
     return { row, existed };
   }
 
   /** Persist service_url for a wiki. Returns updated row or null. */
-  updateServiceUrl(serviceId: string, wikiId: string, serviceUrl: string): WikiRow | null {
-    this.store.updateWikiStatus(serviceId, wikiId, { service_url: serviceUrl });
-    return this.store.getWikiById(serviceId, wikiId);
+  async updateServiceUrl(
+    serviceId: string,
+    wikiId: string,
+    serviceUrl: string,
+  ): Promise<WikiRow | null> {
+    await this.store.updateWikiStatus(serviceId, wikiId, {
+      service_url: serviceUrl,
+    });
+    return await this.store.getWikiById(serviceId, wikiId);
   }
 
   /** Update wiki metadata (name, summary). Returns updated row or null. */
-  updateMeta(serviceId: string, wikiId: string, patch: { name?: string; summary?: string | null }): WikiRow | null {
-    return this.store.updateWikiMeta(serviceId, wikiId, patch);
+  async updateMeta(
+    serviceId: string,
+    wikiId: string,
+    patch: { name?: string; summary?: string | null },
+  ): Promise<WikiRow | null> {
+    return await this.store.updateWikiMeta(serviceId, wikiId, patch);
   }
 
   /**
@@ -319,64 +347,102 @@ export class WikiService {
    *     （status 复位到 draft，保留 wiki 行与 raw），新任务出队后正常 scanning。
    *     这样"取消旧任务 + 排队新任务"在同一调用内原子完成，不存在中间脏态。
    */
-  ingest(
+  async ingest(
     serviceId: string,
     teamId: string,
     wikiId: string,
     requesterUserId?: string,
     opts?: IngestOptions,
-  ): IngestResult {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return { kind: "not_found" };
+  ): Promise<IngestResult> {
+    return this.admissions.run<IngestResult>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return { kind: "not_found" };
 
-    const inFlightStatus = row.status === "pending" || row.status === "processing" ? row.status : null;
-    if (inFlightStatus && opts?.onBusy !== "replace") {
-      // 并发拒绝：正在排队/执行中直接拒绝，不覆盖状态、不重复入队、不写 audit。
-      return { kind: "busy", status: inFlightStatus, step: row.internal_status };
-    }
-    const inFlight = inFlightStatus !== null;
+        const inFlightStatus =
+          row.status === "pending" || row.status === "processing"
+            ? row.status
+            : null;
+        if (inFlightStatus && opts?.onBusy !== "replace") {
+          // 并发拒绝：正在排队/执行中直接拒绝，不覆盖状态、不重复入队、不写 audit。
+          return {
+            kind: "busy",
+            status: inFlightStatus,
+            step: row.internal_status,
+          };
+        }
+        const inFlight = inFlightStatus !== null;
 
-    if (inFlight) {
-      // replace 语义：只中止**当前这一代**（row.version），新任务 version+1 不受影响；
-      // 同时置 cancelling 中间态供前端感知。
-      this.cancelled.set(wikiId, row.version);
-      this.store.updateWikiStatus(serviceId, wikiId, { internal_status: "cancelling" });
-    }
+        if (inFlight) {
+          // replace 语义：只中止**当前这一代**（row.version），新任务 version+1 不受影响；
+          // 同时置 cancelling 中间态供前端感知。
+          this.cancelled.set(wikiId, row.version);
+          await this.store.updateWikiStatus(serviceId, wikiId, {
+            internal_status: "cancelling",
+          });
+        }
 
-    const nextVersion = row.version + 1;
-    this.store.updateWikiStatus(serviceId, wikiId, {
-      status: "pending",
-      internal_status: null,
-      sync_error: null,
-      version: nextVersion,
-    });
-    this.audit({ ...row, version: nextVersion }, "ingest", inFlight ? "ingest (replace)" : "manual ingest", requesterUserId);
-    const fresh = this.store.getWiki(serviceId, teamId, wikiId);
-    if (fresh) this.enqueueBuild(fresh);
-    if (!fresh) return { kind: "not_found" };
-    return inFlight ? { kind: "queued", row: fresh } : { kind: "ok", row: fresh };
+        const nextVersion = row.version + 1;
+        await this.store.updateWikiStatus(serviceId, wikiId, {
+          status: "pending",
+          internal_status: null,
+          sync_error: null,
+          version: nextVersion,
+        });
+        await this.audit(
+          { ...row, version: nextVersion },
+          "ingest",
+          inFlight ? "ingest (replace)" : "manual ingest",
+          requesterUserId,
+        );
+        const fresh = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (fresh) this.enqueueBuild(fresh);
+        if (!fresh) return { kind: "not_found" };
+        return inFlight
+          ? { kind: "queued", row: fresh }
+          : { kind: "ok", row: fresh };
+      },
+    );
   }
 
   /** sync 语义 = 重跑 ingest（管控显式触发）。保持 reject 语义不变。 */
-  sync(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string): IngestResult {
-    return this.ingest(serviceId, teamId, wikiId, requesterUserId);
+  async sync(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+    requesterUserId?: string,
+  ): Promise<IngestResult> {
+    return await this.ingest(serviceId, teamId, wikiId, requesterUserId);
   }
 
-  get(serviceId: string, teamId: string, wikiId: string): WikiRow | null {
-    return this.store.getWiki(serviceId, teamId, wikiId);
+  async get(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+  ): Promise<WikiRow | null> {
+    return await this.store.getWiki(serviceId, teamId, wikiId);
   }
 
   /** 按全局唯一 wiki_id 查询（仍按 service_id 收敛防跨租户）。spec id-only 端点专用。 */
-  getById(serviceId: string, wikiId: string): WikiRow | null {
-    return this.store.getWikiById(serviceId, wikiId);
+  async getById(serviceId: string, wikiId: string): Promise<WikiRow | null> {
+    return await this.store.getWikiById(serviceId, wikiId);
   }
 
-  list(serviceId: string, teamId: string, opts?: ListOpts): WikiRow[] {
-    return this.store.listWikis(serviceId, teamId, opts);
+  async list(
+    serviceId: string,
+    teamId: string,
+    opts?: ListOpts,
+  ): Promise<WikiRow[]> {
+    return await this.store.listWikis(serviceId, teamId, opts);
   }
 
-  count(serviceId: string, teamId: string, opts?: CountOpts): number {
-    return this.store.countWikis(serviceId, teamId, opts);
+  async count(
+    serviceId: string,
+    teamId: string,
+    opts?: CountOpts,
+  ): Promise<number> {
+    return await this.store.countWikis(serviceId, teamId, opts);
   }
 
   /**
@@ -387,20 +453,29 @@ export class WikiService {
    * 硬删 + 清理（不等 worker）。worker 结束前重查发现已删则跳过 ready/回调并再做
    * 一次幂等清理，无残留。
    */
-  delete(serviceId: string, teamId: string, wikiId: string): boolean {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return false;
+  async delete(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+  ): Promise<boolean> {
+    return this.admissions.run<boolean>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return false;
 
-    if (row.status === "pending" || row.status === "processing") {
-      // 哨兵 -1：delete 会硬删行，所有排队中的代际都该中止。
-      this.cancelled.set(wikiId, WikiService.CANCEL_ALL_VERSIONS);
-    }
+        if (row.status === "pending" || row.status === "processing") {
+          // 哨兵 -1：delete 会硬删行，所有排队中的代际都该中止。
+          this.cancelled.set(wikiId, WikiService.CANCEL_ALL_VERSIONS);
+        }
 
-    this.audit(row, "delete", null);
-    this.cleanupResources(serviceId, teamId, wikiId);
-    // 不在此删 cancelled 标记（覆盖 delete 先于 worker 检查点的窗口）；
-    // worker 结束时由 finishCancelled 移除。cleanup 幂等，重复无害。
-    return true;
+        await this.audit(row, "delete", null);
+        await this.cleanupResources(serviceId, teamId, wikiId);
+        // 不在此删 cancelled 标记（覆盖 delete 先于 worker 检查点的窗口）；
+        // worker 结束时由 finishCancelled 移除。cleanup 幂等，重复无害。
+        return true;
+      },
+    );
   }
 
   /**
@@ -410,19 +485,31 @@ export class WikiService {
    *   3. 磁盘目录（wiki/ raw/ index.db 及 -wal/-shm）：rmSync recursive+force（幂等）
    * BuildQueue 排队任务由 runBuild 入口检查 cancelled/行存在性跳过，无需在此处理。
    */
-  private cleanupResources(serviceId: string, teamId: string, wikiId: string): void {
+  private async cleanupResources(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+  ): Promise<void> {
     try {
       evictWikiDb(wikiId);
     } catch (err) {
-      this.logger?.warn?.(`[wiki] evict index.db failed ${wikiId}: ${String(err)}`);
+      this.logger?.warn?.(
+        `[wiki] evict index.db failed ${wikiId}: ${String(err)}`,
+      );
     }
     try {
-      this.store.deleteWiki(serviceId, teamId, wikiId);
+      await this.store.deleteWiki(serviceId, teamId, wikiId);
     } catch (err) {
-      this.logger?.warn?.(`[wiki] hard-delete row failed ${wikiId}: ${String(err)}`);
+      this.logger?.warn?.(
+        `[wiki] hard-delete row failed ${wikiId}: ${String(err)}`,
+      );
+      throw err;
     }
     try {
-      rmSync(this.dirFor(serviceId, teamId, wikiId), { recursive: true, force: true });
+      rmSync(this.dirFor(serviceId, teamId, wikiId), {
+        recursive: true,
+        force: true,
+      });
     } catch (err) {
       this.logger?.warn?.(`[wiki] rm dir failed ${wikiId}: ${String(err)}`);
     }
@@ -438,12 +525,18 @@ export class WikiService {
    *
    * 代际比对让 replace 入队的**新任务不会被自己触发的标记误伤**。
    */
-  private isDeleted(serviceId: string, wikiId: string, version: number): boolean {
+  private async isDeleted(
+    serviceId: string,
+    wikiId: string,
+    version: number,
+  ): Promise<boolean> {
     const marked = this.cancelled.get(wikiId);
     const cancelledHit =
       marked !== undefined &&
       (marked === WikiService.CANCEL_ALL_VERSIONS || marked === version);
-    return cancelledHit || this.store.getWikiById(serviceId, wikiId) === null;
+    return (
+      cancelledHit || (await this.store.getWikiById(serviceId, wikiId)) === null
+    );
   }
 
   /**
@@ -458,12 +551,12 @@ export class WikiService {
    *
    * 两种分支都会移除 cancelled 标记。
    */
-  private finishCancelled(
+  private async finishCancelled(
     serviceId: string,
     teamId: string,
     wikiId: string,
     opts?: { preserveRaw?: boolean },
-  ): void {
+  ): Promise<void> {
     if (opts?.preserveRaw) {
       // 仅当"当前行仍是自己这一代（version <= 被取消代际）"才复位到 draft。
       //
@@ -471,7 +564,7 @@ export class WikiService {
       // pending），说明新任务已接管这一行 —— 此时**绝不能**复位，否则会把新
       // 任务的 pending 冲成 draft，前端就会看到"待加工/排队"的假窗口，实际是
       // 旧 worker 把新任务状态覆盖了。让位不动即可，新任务的状态由它自己驱动。
-      const current = this.store.getWikiById(serviceId, wikiId);
+      const current = await this.store.getWikiById(serviceId, wikiId);
       const cancelledVersion = this.cancelled.get(wikiId);
       const superseded =
         current !== null &&
@@ -483,16 +576,20 @@ export class WikiService {
           `[wiki] ${wikiId} old build aborted; newer ingest (v${current?.version}) already owns status, leaving as-is`,
         );
       } else {
-        this.store.updateWikiStatus(serviceId, wikiId, {
+        await this.store.updateWikiStatus(serviceId, wikiId, {
           status: "draft",
           internal_status: null,
           sync_error: "cancelled by user",
         });
-        this.logger?.info?.(`[wiki] ${wikiId} build aborted (replaced by newer ingest; raw preserved)`);
+        this.logger?.info?.(
+          `[wiki] ${wikiId} build aborted (replaced by newer ingest; raw preserved)`,
+        );
       }
     } else {
-      this.cleanupResources(serviceId, teamId, wikiId);
-      this.logger?.info?.(`[wiki] ${wikiId} build aborted (deleted during processing)`);
+      await this.cleanupResources(serviceId, teamId, wikiId);
+      this.logger?.info?.(
+        `[wiki] ${wikiId} build aborted (deleted during processing)`,
+      );
     }
     this.cancelled.delete(wikiId);
   }
@@ -505,14 +602,22 @@ export class WikiService {
    * 注意：不能直接用 isDeleted() 区分（它是 cancelled 标记 OR 行不存在的双判据），
    * 必须单独查行是否存在。
    */
-  private isCancelledByReplace(serviceId: string, wikiId: string): boolean {
-    return this.store.getWikiById(serviceId, wikiId) !== null;
+  private async isCancelledByReplace(
+    serviceId: string,
+    wikiId: string,
+  ): Promise<boolean> {
+    return (await this.store.getWikiById(serviceId, wikiId)) !== null;
   }
 
   /** 写一条 wiki 审计记录。失败不阻断主流程。 */
-  private audit(row: WikiRow, action: AuditAction, detail: string | null, requesterUserId?: string): void {
+  private async audit(
+    row: WikiRow,
+    action: AuditAction,
+    detail: string | null,
+    requesterUserId?: string,
+  ): Promise<void> {
     try {
-      this.store.appendWikiAudit({
+      await this.store.appendWikiAudit({
         service_id: row.service_id,
         asset_id: row.wiki_id,
         version: row.version,
@@ -532,40 +637,63 @@ export class WikiService {
   // ═══════════════════════════════════════════════════════════════════
 
   /** 列出 raw/sources/ 下的素材文件（改查 source 表，设计 003 §3.5）。wiki 不存在返回 null。 */
-  rawLs(serviceId: string, teamId: string, wikiId: string): RawFileEntry[] | null {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    const dir = this.dirFor(serviceId, teamId, wikiId);
-    try {
-      const db = getReadDb(wikiId, dir);
-      return listSources(db).map((s) => ({
-        filename: s.filename,
-        size: s.size,
-        status: s.status,
-        created_at: s.created_at,
-        updated_at: s.updated_at,
-        last_modified_by: s.last_modified_by,
-        ingested_at: s.ingested_at,
-        uploaded_at: s.created_at, // 兼容旧字段
-      }));
-    } catch {
-      // index.db 尚未创建（老 wiki / 从未 rawWrite）→ 无 source 登记。
-      return [];
-    }
+  async rawLs(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+  ): Promise<RawFileEntry[] | null> {
+    return this.admissions.run<RawFileEntry[] | null>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        const dir = this.dirFor(serviceId, teamId, wikiId);
+        try {
+          const db = getReadDb(wikiId, dir);
+          return (await listSources(db)).map((s) => ({
+            filename: s.filename,
+            size: s.size,
+            status: s.status,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+            last_modified_by: s.last_modified_by,
+            ingested_at: s.ingested_at,
+            uploaded_at: s.created_at, // 兼容旧字段
+          }));
+        } catch {
+          // index.db 尚未创建（老 wiki / 从未 rawWrite）→ 无 source 登记。
+          return [];
+        }
+      },
+    );
   }
 
   /** 读单个 raw 文件原文。文件不存在返回 null（含 wiki 不存在）。 */
-  rawRead(serviceId: string, teamId: string, wikiId: string, filename: string): string | null {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    const sourcesDir = join(this.dirFor(serviceId, teamId, wikiId), "raw", "sources");
-    const safe = this.resolveRawPath(sourcesDir, filename);
-    if (!safe) return null;
-    try {
-      return readFileSync(safe, "utf-8");
-    } catch {
-      return null;
-    }
+  async rawRead(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+    filename: string,
+  ): Promise<string | null> {
+    return this.admissions.run<string | null>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        const sourcesDir = join(
+          this.dirFor(serviceId, teamId, wikiId),
+          "raw",
+          "sources",
+        );
+        const safe = this.resolveRawPath(sourcesDir, filename);
+        if (!safe) return null;
+        try {
+          return readFileSync(safe, "utf-8");
+        } catch {
+          return null;
+        }
+      },
+    );
   }
 
   /**
@@ -575,36 +703,45 @@ export class WikiService {
    * - 超 RAW_READ_MAX → 抛错（router 转 400）
    * 单个文件不存在不报错，对应 item 标 not_found:true（spec：整体仍 200）。
    */
-  rawReadMany(
+  async rawReadMany(
     serviceId: string,
     teamId: string,
     wikiId: string,
     filenames: string[],
-  ): WriteOutcome<RawReadItem[]> {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    if (filenames.length > RAW_READ_MAX) {
-      throw new Error(`filenames exceeds max ${RAW_READ_MAX}`);
-    }
-    const sourcesDir = join(this.dirFor(serviceId, teamId, wikiId), "raw", "sources");
-    // 先全部校验路径合法性（任一不合法整批 400）
-    const safePaths: string[] = [];
-    for (const fn of filenames) {
-      const safe = this.resolveRawPath(sourcesDir, fn);
-      if (!safe) return "invalid_path";
-      safePaths.push(safe);
-    }
-    const items: RawReadItem[] = [];
-    for (let i = 0; i < filenames.length; i++) {
-      const filename = filenames[i];
-      try {
-        const content = readFileSync(safePaths[i], "utf-8");
-        items.push({ filename, content });
-      } catch {
-        items.push({ filename, not_found: true });
-      }
-    }
-    return items;
+  ): Promise<WriteOutcome<RawReadItem[]>> {
+    return this.admissions.run<WriteOutcome<RawReadItem[]>>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        if (filenames.length > RAW_READ_MAX) {
+          throw new Error(`filenames exceeds max ${RAW_READ_MAX}`);
+        }
+        const sourcesDir = join(
+          this.dirFor(serviceId, teamId, wikiId),
+          "raw",
+          "sources",
+        );
+        // 先全部校验路径合法性（任一不合法整批 400）
+        const safePaths: string[] = [];
+        for (const fn of filenames) {
+          const safe = this.resolveRawPath(sourcesDir, fn);
+          if (!safe) return "invalid_path";
+          safePaths.push(safe);
+        }
+        const items: RawReadItem[] = [];
+        for (let i = 0; i < filenames.length; i++) {
+          const filename = filenames[i];
+          try {
+            const content = readFileSync(safePaths[i], "utf-8");
+            items.push({ filename, content });
+          } catch {
+            items.push({ filename, not_found: true });
+          }
+        }
+        return items;
+      },
+    );
   }
 
   /**
@@ -614,34 +751,49 @@ export class WikiService {
    * - 路径穿越 → "invalid_path"
    * - 超 5MB → "too_large"
    */
-  rawWrite(
+  async rawWrite(
     serviceId: string,
     teamId: string,
     wikiId: string,
     filename: string,
     content: string,
     userId?: string,
-  ): WriteOutcome<RawWriteResult> {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    // 注：此处**刻意不拦 processing**。设计 2026-09-21「导入并抽取」要求
-    // "新导入覆盖旧导入"：抽取进行中再次导入时必须允许写入 raw，否则返回
-    // 409 "wiki is processing; cannot write/delete" 阻断导入。
-    // 安全性：跟随的 ingest(onBusy:'replace') 会取消旧任务，其产出的 page
-    // 结果被 runBuild 检查点丢弃；新任务重新按 sha256 差分扫描全部 raw
-    // （已 ingested 且 sha 未变者跳过），因此不存在脏数据落库。
+  ): Promise<WriteOutcome<RawWriteResult>> {
+    return this.admissions.run<WriteOutcome<RawWriteResult>>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        // 注：此处**刻意不拦 processing**。设计 2026-09-21「导入并抽取」要求
+        // "新导入覆盖旧导入"：抽取进行中再次导入时必须允许写入 raw，否则返回
+        // 409 "wiki is processing; cannot write/delete" 阻断导入。
+        // 安全性：跟随的 ingest(onBusy:'replace') 会取消旧任务，其产出的 page
+        // 结果被 runBuild 检查点丢弃；新任务重新按 sha256 差分扫描全部 raw
+        // （已 ingested 且 sha 未变者跳过），因此不存在脏数据落库。
 
-    const size = Buffer.byteLength(content, "utf-8");
-    if (size > RAW_WRITE_MAX_BYTES) return "too_large";
+        const size = Buffer.byteLength(content, "utf-8");
+        if (size > RAW_WRITE_MAX_BYTES) return "too_large";
 
-    const sourcesDir = join(this.dirFor(serviceId, teamId, wikiId), "raw", "sources");
-    const safe = this.resolveRawPath(sourcesDir, filename);
-    if (!safe) return "invalid_path";
+        const sourcesDir = join(
+          this.dirFor(serviceId, teamId, wikiId),
+          "raw",
+          "sources",
+        );
+        const safe = this.resolveRawPath(sourcesDir, filename);
+        if (!safe) return "invalid_path";
 
-    mkdirSync(sourcesDir, { recursive: true });
-    writeFileSync(safe, content, "utf-8");
-    this.registerSources(serviceId, teamId, wikiId, [{ filename, content, size }], userId);
-    return { filename, size };
+        mkdirSync(sourcesDir, { recursive: true });
+        writeFileSync(safe, content, "utf-8");
+        await this.registerSources(
+          serviceId,
+          teamId,
+          wikiId,
+          [{ filename, content, size }],
+          userId,
+        );
+        return { filename, size };
+      },
+    );
   }
 
   /**
@@ -651,88 +803,107 @@ export class WikiService {
    *   的文件），保证整批要么都成功要么都没生效。
    * 错误码同 rawWrite。
    */
-  rawWriteMany(
+  async rawWriteMany(
     serviceId: string,
     teamId: string,
     wikiId: string,
     files: { filename: string; content: string }[],
     userId?: string,
-  ): WriteOutcome<RawWriteManyItem[]> {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    // 同上（rawWrite）：刻意不拦 processing，以支持"抽取中再次导入"覆盖写入。
-    if (files.length > RAW_WRITE_MAX) {
-      throw new Error(`files exceeds max ${RAW_WRITE_MAX}`);
-    }
-
-    const sourcesDir = join(this.dirFor(serviceId, teamId, wikiId), "raw", "sources");
-    type Plan = {
-      filename: string;
-      safePath: string;
-      content: string;
-      size: number;
-      preExistingContent: string | null; // 落盘前已有则记下来，回滚要还原
-    };
-    const plans: Plan[] = [];
-    for (const { filename, content } of files) {
-      if (typeof content !== "string") return "invalid_path";
-      const size = Buffer.byteLength(content, "utf-8");
-      if (size > RAW_WRITE_MAX_BYTES) return "too_large";
-      const safe = this.resolveRawPath(sourcesDir, filename);
-      if (!safe) return "invalid_path";
-      let pre: string | null = null;
-      try {
-        pre = readFileSync(safe, "utf-8");
-      } catch {
-        pre = null;
-      }
-      plans.push({ filename, safePath: safe, content, size, preExistingContent: pre });
-    }
-
-    mkdirSync(sourcesDir, { recursive: true });
-    const written: Plan[] = [];
-    try {
-      for (const p of plans) {
-        writeFileSync(p.safePath, p.content, "utf-8");
-        written.push(p);
-      }
-    } catch (err) {
-      // 回滚：恢复每个已写文件的旧内容（不存在则删）
-      for (const p of written) {
-        try {
-          if (p.preExistingContent === null) {
-            rmSync(p.safePath, { force: true });
-          } else {
-            writeFileSync(p.safePath, p.preExistingContent, "utf-8");
-          }
-        } catch {
-          // 回滚也失败的话，只能记录由调用方重新跑 ingest 兜底
+  ): Promise<WriteOutcome<RawWriteManyItem[]>> {
+    return this.admissions.run<WriteOutcome<RawWriteManyItem[]>>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        // 同上（rawWrite）：刻意不拦 processing，以支持"抽取中再次导入"覆盖写入。
+        if (files.length > RAW_WRITE_MAX) {
+          throw new Error(`files exceeds max ${RAW_WRITE_MAX}`);
         }
-      }
-      throw err;
-    }
 
-    // 全部落盘成功后登记 source 表（先查再更新，sha 未变幂等）。
-    this.registerSources(
-      serviceId,
-      teamId,
-      wikiId,
-      plans.map((p) => ({ filename: p.filename, content: p.content, size: p.size })),
-      userId,
+        const sourcesDir = join(
+          this.dirFor(serviceId, teamId, wikiId),
+          "raw",
+          "sources",
+        );
+        type Plan = {
+          filename: string;
+          safePath: string;
+          content: string;
+          size: number;
+          preExistingContent: string | null; // 落盘前已有则记下来，回滚要还原
+        };
+        const plans: Plan[] = [];
+        for (const { filename, content } of files) {
+          if (typeof content !== "string") return "invalid_path";
+          const size = Buffer.byteLength(content, "utf-8");
+          if (size > RAW_WRITE_MAX_BYTES) return "too_large";
+          const safe = this.resolveRawPath(sourcesDir, filename);
+          if (!safe) return "invalid_path";
+          let pre: string | null = null;
+          try {
+            pre = readFileSync(safe, "utf-8");
+          } catch {
+            pre = null;
+          }
+          plans.push({
+            filename,
+            safePath: safe,
+            content,
+            size,
+            preExistingContent: pre,
+          });
+        }
+
+        mkdirSync(sourcesDir, { recursive: true });
+        const written: Plan[] = [];
+        try {
+          for (const p of plans) {
+            writeFileSync(p.safePath, p.content, "utf-8");
+            written.push(p);
+          }
+        } catch (err) {
+          // 回滚：恢复每个已写文件的旧内容（不存在则删）
+          for (const p of written) {
+            try {
+              if (p.preExistingContent === null) {
+                rmSync(p.safePath, { force: true });
+              } else {
+                writeFileSync(p.safePath, p.preExistingContent, "utf-8");
+              }
+            } catch {
+              // 回滚也失败的话，只能记录由调用方重新跑 ingest 兜底
+            }
+          }
+          throw err;
+        }
+
+        // 全部落盘成功后登记 source 表（先查再更新，sha 未变幂等）。
+        await this.registerSources(
+          serviceId,
+          teamId,
+          wikiId,
+          plans.map((p) => ({
+            filename: p.filename,
+            content: p.content,
+            size: p.size,
+          })),
+          userId,
+        );
+        // 拉取入盘后 bump version + 更新 last_sync_at（设计 §3.1⑥）。
+        // - version 用于下游变更检测（ingest 时对比源文件版本 vs 已抽取版本）
+        // - last_sync_at 用于外部同步观测点（"上次拉取时间"）
+        // 幂等：即使 files 内容全部相同，写盘 + 登记也走一遍，版本仍会前进，
+        //   这是 SoT（wiki 表状态）的期望行为：raw 一旦被写过就算作新版本，
+        //   由下游 ingest 决定是否真的重新抽取（sha 相同则跳过）。
+        if (plans.length > 0) {
+          await this.store.updateWikiStatus(serviceId, wikiId, {
+            version: row.version + 1,
+            last_sync_at: new Date().toISOString(),
+          });
+        }
+        return plans.map(({ filename, size }) => ({ filename, size }));
+      },
     );
-    // 拉取入盘后 bump version + 更新 last_sync_at（设计 §3.1⑥）。
-    // - version 用于下游变更检测（ingest 时对比源文件版本 vs 已抽取版本）
-    // - last_sync_at 用于外部同步观测点（"上次拉取时间"）
-    // 幂等：即使 files 内容全部相同，写盘 + 登记也走一遍，版本仍会前进，
-    //   这是 SoT（wiki 表状态）的期望行为：raw 一旦被写过就算作新版本，
-    //   由下游 ingest 决定是否真的重新抽取（sha 相同则跳过）。
-    if (plans.length > 0) {
-      this.store.updateWikiStatus(serviceId, wikiId, {
-        version: row.version + 1,
-        last_sync_at: new Date().toISOString(),
-      });
-    }
-    return plans.map(({ filename, size }) => ({ filename, size }));
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -749,7 +920,11 @@ export class WikiService {
   // ─────────────────────────────────────────────────────────────
 
   /** 映射文件路径：`<wikiDir>/import-map.json`。 */
-  private importMapPath(serviceId: string, teamId: string, wikiId: string): string {
+  private importMapPath(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+  ): string {
     return join(this.dirFor(serviceId, teamId, wikiId), "import-map.json");
   }
 
@@ -766,7 +941,9 @@ export class WikiService {
     try {
       const p = this.importMapPath(serviceId, teamId, wikiId);
       if (!existsSync(p)) return {};
-      const parsed = JSON.parse(readFileSync(p, "utf-8")) as ImportNameMapFile | null;
+      const parsed = JSON.parse(
+        readFileSync(p, "utf-8"),
+      ) as ImportNameMapFile | null;
       const providers = parsed?.providers;
       if (!providers || typeof providers !== "object") return {};
       const m = providers[providerId];
@@ -787,31 +964,45 @@ export class WikiService {
    * 写回某 provider 的文件名映射（整份覆盖）。
    * 写失败只记日志——文件本身已落盘，映射丢失仅影响下一轮的名字复用，不阻断当前导入。
    */
-  writeImportNameMap(
+  async writeImportNameMap(
     serviceId: string,
     teamId: string,
     wikiId: string,
     providerId: string,
     map: Record<string, string>,
-  ): void {
-    try {
-      const p = this.importMapPath(serviceId, teamId, wikiId);
-      let file: ImportNameMapFile = { version: 1, providers: {} };
-      if (existsSync(p)) {
+  ): Promise<void> {
+    return this.admissions.run<void>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
         try {
-          const parsed = JSON.parse(readFileSync(p, "utf-8")) as ImportNameMapFile | null;
-          if (parsed && typeof parsed === "object" && parsed.providers) file = parsed;
-        } catch {
-          // 损坏则整体重建
+          const p = this.importMapPath(serviceId, teamId, wikiId);
+          let file: ImportNameMapFile = { version: 1, providers: {} };
+          if (existsSync(p)) {
+            try {
+              const parsed = JSON.parse(
+                readFileSync(p, "utf-8"),
+              ) as ImportNameMapFile | null;
+              if (parsed && typeof parsed === "object" && parsed.providers)
+                file = parsed;
+            } catch {
+              // 损坏则整体重建
+            }
+          }
+          file.providers[providerId] = map;
+          mkdirSync(dirname(p), { recursive: true });
+          writeFileSync(p, JSON.stringify(file, null, 2), "utf-8");
+          await this.artifactStore?.checkpoint(
+            this.dirFor(serviceId, teamId, wikiId),
+          );
+        } catch (err) {
+          const msg = redactLogText(
+            err instanceof Error ? err.message : String(err),
+          );
+          this.logger?.warn?.(`import-map write failed: ${msg}`);
+          throw err;
         }
-      }
-      file.providers[providerId] = map;
-      mkdirSync(dirname(p), { recursive: true });
-      writeFileSync(p, JSON.stringify(file, null, 2), "utf-8");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger?.warn?.(`import-map write failed: ${msg}`);
-    }
+      },
+    );
   }
 
   /**
@@ -828,45 +1019,55 @@ export class WikiService {
     wikiId: string,
     filenames: string[],
   ): Promise<WriteOutcome<RawRmResult>> {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    if (row.status === "processing") return "processing";
-    if (filenames.length > RAW_RM_MAX) {
-      throw new Error(`filenames exceeds max ${RAW_RM_MAX}`);
-    }
+    return this.admissions.run<WriteOutcome<RawRmResult>>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        if (row.status === "processing") return "processing";
+        if (filenames.length > RAW_RM_MAX) {
+          throw new Error(`filenames exceeds max ${RAW_RM_MAX}`);
+        }
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const sourcesDir = join(projectPath, "raw", "sources");
-    const fullPaths: string[] = [];
-    for (const fn of filenames) {
-      const safe = this.resolveRawPath(sourcesDir, fn);
-      if (!safe) return "invalid_path";
-      fullPaths.push(safe);
-    }
+        const projectPath = this.dirFor(serviceId, teamId, wikiId);
+        const sourcesDir = join(projectPath, "raw", "sources");
+        const fullPaths: string[] = [];
+        for (const fn of filenames) {
+          const safe = this.resolveRawPath(sourcesDir, fn);
+          if (!safe) return "invalid_path";
+          fullPaths.push(safe);
+        }
 
-    // 自研级联删除：删 raw 源并清理引用它的 page（frontmatter sources 驱动）。
-    const { deleteSourceFiles } = await import(
-      "../engines/wiki/ingest-v2/cascade.js"
+        // 自研级联删除：删 raw 源并清理引用它的 page（frontmatter sources 驱动）。
+        const { deleteSourceFiles } =
+          await import("../engines/wiki/ingest-v2/cascade.js");
+        const result = await deleteSourceFiles(projectPath, fullPaths, {
+          logReason: "wiki/raw/rm",
+        });
+
+        // 删除对应 source 行（与文件级联删除对应，设计 003 §5）。
+        try {
+          await initIndexDb(projectPath);
+          await withWriteDb(projectPath, async (db) => {
+            await deleteSources(db, filenames);
+            await this.artifactStore?.checkpoint(projectPath, db);
+          });
+        } catch (err) {
+          this.logger?.warn?.(
+            `[wiki] source rows delete failed: ${String(err)}`,
+          );
+          throw err;
+        }
+
+        return {
+          deleted_files: filenames,
+          deleted_pages: result.deletedWikiPaths.map((p: string) =>
+            this.absToPageRef(projectPath, p),
+          ),
+          rewritten_pages: result.rewrittenSourcePages,
+        };
+      },
     );
-    const result = await deleteSourceFiles(projectPath, fullPaths, {
-      logReason: "wiki/raw/rm",
-    });
-
-    // 删除对应 source 行（与文件级联删除对应，设计 003 §5）。
-    try {
-      initIndexDb(projectPath);
-      withWriteDb(projectPath, (db) => deleteSources(db, filenames));
-    } catch (err) {
-      this.logger?.warn?.(`[wiki] source rows delete failed: ${String(err)}`);
-    }
-
-    return {
-      deleted_files: filenames,
-      deleted_pages: result.deletedWikiPaths.map((p: string) =>
-        this.absToPageRef(projectPath, p),
-      ),
-      rewritten_pages: result.rewrittenSourcePages,
-    };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -877,33 +1078,76 @@ export class WikiService {
    * 列出 wiki/ 下的 page 文件（recursive 扫描 .md 取 frontmatter）。
    * status≠ready 时返回空数组。
    */
-  pageLs(serviceId: string, teamId: string, wikiId: string): { id: string; title: string; type: string; path: string; description?: string; locked?: boolean }[] | null {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    if (row.status !== "ready") return [];
+  async pageLs(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+  ): Promise<
+    | {
+        id: string;
+        title: string;
+        type: string;
+        path: string;
+        description?: string;
+        locked?: boolean;
+      }[]
+    | null
+  > {
+    return this.admissions.run<
+      | {
+          id: string;
+          title: string;
+          type: string;
+          path: string;
+          description?: string;
+          locked?: boolean;
+        }[]
+      | null
+    >(JSON.stringify([serviceId, wikiId]), async () => {
+      const row = await this.store.getWiki(serviceId, teamId, wikiId);
+      if (!row) return null;
+      if (row.status !== "ready") return [];
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const wikiDir = join(projectPath, "wiki");
-    if (!existsSync(wikiDir)) return [];
+      const projectPath = this.dirFor(serviceId, teamId, wikiId);
+      const wikiDir = join(projectPath, "wiki");
+      if (!existsSync(wikiDir)) return [];
 
-    const items: { id: string; title: string; type: string; path: string; description?: string; locked?: boolean }[] = [];
-    this.scanPagesRecursive(wikiDir, wikiDir, items);
-    return items;
+      const items: {
+        id: string;
+        title: string;
+        type: string;
+        path: string;
+        description?: string;
+        locked?: boolean;
+      }[] = [];
+      this.scanPagesRecursive(wikiDir, wikiDir, items);
+      return items;
+    });
   }
 
   /** 读单个 page 原文。ref 可以是 page id 或 relPath。 */
-  pageRead(serviceId: string, teamId: string, wikiId: string, ref: string): string | null {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
+  async pageRead(
+    serviceId: string,
+    teamId: string,
+    wikiId: string,
+    ref: string,
+  ): Promise<string | null> {
+    return this.admissions.run<string | null>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const safe = this.resolvePageRef(projectPath, ref);
-    if (!safe) return null;
-    try {
-      return readFileSync(safe, "utf-8");
-    } catch {
-      return null;
-    }
+        const projectPath = this.dirFor(serviceId, teamId, wikiId);
+        const safe = this.resolvePageRef(projectPath, ref);
+        if (!safe) return null;
+        try {
+          return readFileSync(safe, "utf-8");
+        } catch {
+          return null;
+        }
+      },
+    );
   }
 
   /**
@@ -913,37 +1157,44 @@ export class WikiService {
    * - 超 PAGE_READ_MAX → 抛错
    * 单个 ref 不存在不报错，对应 item 标 not_found:true（spec：整体仍 200）。
    */
-  pageReadMany(
+  async pageReadMany(
     serviceId: string,
     teamId: string,
     wikiId: string,
     refs: string[],
-  ): WriteOutcome<PageReadItem[]> {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    if (refs.length > PAGE_READ_MAX) {
-      throw new Error(`refs exceeds max ${PAGE_READ_MAX}`);
-    }
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const safePaths: string[] = [];
-    for (const r of refs) {
-      // 读用 allowMissing 不行——not_found 也得是合法路径，所以这里
-      // 区分"路径合法但文件不存在（not_found）"与"路径非法（invalid_path）"
-      const safe = this.resolvePageRef(projectPath, r, { allowMissing: true });
-      if (!safe) return "invalid_path";
-      safePaths.push(safe);
-    }
-    const items: PageReadItem[] = [];
-    for (let i = 0; i < refs.length; i++) {
-      const ref = refs[i];
-      try {
-        const content = readFileSync(safePaths[i], "utf-8");
-        items.push({ ref, content });
-      } catch {
-        items.push({ ref, not_found: true });
-      }
-    }
-    return items;
+  ): Promise<WriteOutcome<PageReadItem[]>> {
+    return this.admissions.run<WriteOutcome<PageReadItem[]>>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        if (refs.length > PAGE_READ_MAX) {
+          throw new Error(`refs exceeds max ${PAGE_READ_MAX}`);
+        }
+        const projectPath = this.dirFor(serviceId, teamId, wikiId);
+        const safePaths: string[] = [];
+        for (const r of refs) {
+          // 读用 allowMissing 不行——not_found 也得是合法路径，所以这里
+          // 区分"路径合法但文件不存在（not_found）"与"路径非法（invalid_path）"
+          const safe = this.resolvePageRef(projectPath, r, {
+            allowMissing: true,
+          });
+          if (!safe) return "invalid_path";
+          safePaths.push(safe);
+        }
+        const items: PageReadItem[] = [];
+        for (let i = 0; i < refs.length; i++) {
+          const ref = refs[i];
+          try {
+            const content = readFileSync(safePaths[i], "utf-8");
+            items.push({ ref, content });
+          } catch {
+            items.push({ ref, not_found: true });
+          }
+        }
+        return items;
+      },
+    );
   }
 
   /**
@@ -954,31 +1205,40 @@ export class WikiService {
    * - 结构性文件 → "forbidden_path"
    * - 超 512KB → "too_large"
    */
-  pageWrite(
+  async pageWrite(
     serviceId: string,
     teamId: string,
     wikiId: string,
     ref: string,
     content: string,
-  ): WriteOutcome<PageWriteResult> {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    if (row.status === "processing") return "processing";
+  ): Promise<WriteOutcome<PageWriteResult>> {
+    return this.admissions.run<WriteOutcome<PageWriteResult>>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        if (row.status === "processing") return "processing";
 
-    const size = Buffer.byteLength(content, "utf-8");
-    if (size > PAGE_WRITE_MAX_BYTES) return "too_large";
+        const size = Buffer.byteLength(content, "utf-8");
+        if (size > PAGE_WRITE_MAX_BYTES) return "too_large";
 
-    if (this.isForbiddenPageRef(ref)) return "forbidden_path";
+        if (this.isForbiddenPageRef(ref)) return "forbidden_path";
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const safe = this.resolvePageRef(projectPath, ref, { allowMissing: true });
-    if (!safe) return "invalid_path";
+        const projectPath = this.dirFor(serviceId, teamId, wikiId);
+        const safe = this.resolvePageRef(projectPath, ref, {
+          allowMissing: true,
+        });
+        if (!safe) return "invalid_path";
 
-    const { content: finalContent, lockedInjected } = injectLockedTrue(content);
+        const { content: finalContent, lockedInjected } =
+          injectLockedTrue(content);
 
-    mkdirSync(join(safe, ".."), { recursive: true });
-    writeFileSync(safe, finalContent, "utf-8");
-    return { ref, locked_injected: lockedInjected };
+        mkdirSync(join(safe, ".."), { recursive: true });
+        writeFileSync(safe, finalContent, "utf-8");
+        await this.artifactStore?.checkpoint(projectPath);
+        return { ref, locked_injected: lockedInjected };
+      },
+    );
   }
 
   /**
@@ -987,68 +1247,86 @@ export class WikiService {
    *   结构性文件 → "forbidden_path"；超 512KB → "too_large"
    * - 全部通过后逐文件落盘；任一失败回滚已写文件。
    */
-  pageWriteMany(
+  async pageWriteMany(
     serviceId: string,
     teamId: string,
     wikiId: string,
     pages: { ref: string; content: string }[],
-  ): WriteOutcome<PageWriteManyItem[]> {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    if (row.status === "processing") return "processing";
-    if (pages.length > PAGE_WRITE_MAX) {
-      throw new Error(`pages exceeds max ${PAGE_WRITE_MAX}`);
-    }
-
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    type Plan = {
-      ref: string;
-      safePath: string;
-      finalContent: string;
-      lockedInjected: boolean;
-      preExistingContent: string | null;
-    };
-    const plans: Plan[] = [];
-    for (const { ref, content } of pages) {
-      if (typeof content !== "string") return "invalid_path";
-      if (this.isForbiddenPageRef(ref)) return "forbidden_path";
-      const size = Buffer.byteLength(content, "utf-8");
-      if (size > PAGE_WRITE_MAX_BYTES) return "too_large";
-      const safe = this.resolvePageRef(projectPath, ref, { allowMissing: true });
-      if (!safe) return "invalid_path";
-      const { content: finalContent, lockedInjected } = injectLockedTrue(content);
-      let pre: string | null = null;
-      try {
-        pre = readFileSync(safe, "utf-8");
-      } catch {
-        pre = null;
-      }
-      plans.push({ ref, safePath: safe, finalContent, lockedInjected, preExistingContent: pre });
-    }
-
-    const written: Plan[] = [];
-    try {
-      for (const p of plans) {
-        mkdirSync(join(p.safePath, ".."), { recursive: true });
-        writeFileSync(p.safePath, p.finalContent, "utf-8");
-        written.push(p);
-      }
-    } catch (err) {
-      for (const p of written) {
-        try {
-          if (p.preExistingContent === null) {
-            rmSync(p.safePath, { force: true });
-          } else {
-            writeFileSync(p.safePath, p.preExistingContent, "utf-8");
-          }
-        } catch {
-          // best-effort 回滚
+  ): Promise<WriteOutcome<PageWriteManyItem[]>> {
+    return this.admissions.run<WriteOutcome<PageWriteManyItem[]>>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        if (row.status === "processing") return "processing";
+        if (pages.length > PAGE_WRITE_MAX) {
+          throw new Error(`pages exceeds max ${PAGE_WRITE_MAX}`);
         }
-      }
-      throw err;
-    }
 
-    return plans.map(({ ref, lockedInjected }) => ({ ref, locked_injected: lockedInjected }));
+        const projectPath = this.dirFor(serviceId, teamId, wikiId);
+        type Plan = {
+          ref: string;
+          safePath: string;
+          finalContent: string;
+          lockedInjected: boolean;
+          preExistingContent: string | null;
+        };
+        const plans: Plan[] = [];
+        for (const { ref, content } of pages) {
+          if (typeof content !== "string") return "invalid_path";
+          if (this.isForbiddenPageRef(ref)) return "forbidden_path";
+          const size = Buffer.byteLength(content, "utf-8");
+          if (size > PAGE_WRITE_MAX_BYTES) return "too_large";
+          const safe = this.resolvePageRef(projectPath, ref, {
+            allowMissing: true,
+          });
+          if (!safe) return "invalid_path";
+          const { content: finalContent, lockedInjected } =
+            injectLockedTrue(content);
+          let pre: string | null = null;
+          try {
+            pre = readFileSync(safe, "utf-8");
+          } catch {
+            pre = null;
+          }
+          plans.push({
+            ref,
+            safePath: safe,
+            finalContent,
+            lockedInjected,
+            preExistingContent: pre,
+          });
+        }
+
+        const written: Plan[] = [];
+        try {
+          for (const p of plans) {
+            mkdirSync(join(p.safePath, ".."), { recursive: true });
+            writeFileSync(p.safePath, p.finalContent, "utf-8");
+            written.push(p);
+          }
+        } catch (err) {
+          for (const p of written) {
+            try {
+              if (p.preExistingContent === null) {
+                rmSync(p.safePath, { force: true });
+              } else {
+                writeFileSync(p.safePath, p.preExistingContent, "utf-8");
+              }
+            } catch {
+              // best-effort 回滚
+            }
+          }
+          throw err;
+        }
+
+        await this.artifactStore?.checkpoint(projectPath);
+        return plans.map(({ ref, lockedInjected }) => ({
+          ref,
+          locked_injected: lockedInjected,
+        }));
+      },
+    );
   }
 
   /**
@@ -1065,33 +1343,41 @@ export class WikiService {
     wikiId: string,
     refs: string[],
   ): Promise<WriteOutcome<PageRmResult>> {
-    const row = this.store.getWiki(serviceId, teamId, wikiId);
-    if (!row) return null;
-    if (row.status === "processing") return "processing";
-    if (refs.length > PAGE_RM_MAX) {
-      throw new Error(`refs exceeds max ${PAGE_RM_MAX}`);
-    }
+    return this.admissions.run<WriteOutcome<PageRmResult>>(
+      JSON.stringify([serviceId, wikiId]),
+      async () => {
+        const row = await this.store.getWiki(serviceId, teamId, wikiId);
+        if (!row) return null;
+        if (row.status === "processing") return "processing";
+        if (refs.length > PAGE_RM_MAX) {
+          throw new Error(`refs exceeds max ${PAGE_RM_MAX}`);
+        }
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const fullPaths: string[] = [];
-    for (const r of refs) {
-      if (this.isForbiddenPageRef(r)) return "forbidden_path";
-      const safe = this.resolvePageRef(projectPath, r);
-      if (!safe) return "invalid_path";
-      fullPaths.push(safe);
-    }
+        const projectPath = this.dirFor(serviceId, teamId, wikiId);
+        const fullPaths: string[] = [];
+        for (const r of refs) {
+          if (this.isForbiddenPageRef(r)) return "forbidden_path";
+          const safe = this.resolvePageRef(projectPath, r);
+          if (!safe) return "invalid_path";
+          fullPaths.push(safe);
+        }
 
-    const { cascadeDeleteWikiPagesWithRefs } = await import(
-      "../engines/wiki/ingest-v2/cascade.js"
+        const { cascadeDeleteWikiPagesWithRefs } =
+          await import("../engines/wiki/ingest-v2/cascade.js");
+        const result = await cascadeDeleteWikiPagesWithRefs(
+          projectPath,
+          fullPaths,
+        );
+        await this.artifactStore?.checkpoint(projectPath);
+
+        return {
+          deleted_pages: result.deletedPaths.map((p: string) =>
+            this.absToPageRef(projectPath, p),
+          ),
+          rewritten_files: result.rewrittenFiles,
+        };
+      },
     );
-    const result = await cascadeDeleteWikiPagesWithRefs(projectPath, fullPaths);
-
-    return {
-      deleted_pages: result.deletedPaths.map((p: string) =>
-        this.absToPageRef(projectPath, p),
-      ),
-      rewritten_files: result.rewrittenFiles,
-    };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1104,33 +1390,38 @@ export class WikiService {
    * （先查再更新：新建 uploaded / sha 变则重置 uploaded / sha 未变幂等）。
    * 登记失败不阻断写盘主流程（文件已落盘）——记 warn，交由后续 ingest/rawLs 兜底。
    */
-  private registerSources(
+  private async registerSources(
     serviceId: string,
     teamId: string,
     wikiId: string,
     files: { filename: string; content: string; size: number }[],
     userId?: string,
-  ): void {
+  ): Promise<void> {
     const dir = this.dirFor(serviceId, teamId, wikiId);
     try {
-      initIndexDb(dir);
-      withWriteDb(dir, (db) => {
+      await initIndexDb(dir);
+      await withWriteDb(dir, async (db) => {
         for (const f of files) {
-          upsertSource(db, {
+          await upsertSource(db, {
             filename: f.filename,
             sha256: sha256(f.content),
             size: f.size,
             userId: userId ?? null,
           });
         }
+        await this.artifactStore?.checkpoint(dir, db);
       });
     } catch (err) {
-      this.logger?.warn?.(`[wiki] source register failed for ${wikiId}: ${String(err)}`);
+      this.logger?.warn?.(
+        `[wiki] source register failed for ${wikiId}: ${String(err)}`,
+      );
+      throw err;
     }
   }
 
   private resolveRawPath(sourcesDir: string, filename: string): string | null {
-    if (!filename || filename.includes("..") || filename.startsWith("/")) return null;
+    if (!filename || filename.includes("..") || filename.startsWith("/"))
+      return null;
     const normalized = normalize(filename);
     if (normalized.startsWith("..") || normalized.startsWith("/")) return null;
     // resolve(sourcesDir) 转成绝对路径，避免 sourcesDir 是相对路径时
@@ -1161,7 +1452,9 @@ export class WikiService {
     const wikiDirSep = wikiDir.endsWith("/") ? wikiDir : wikiDir + "/";
 
     // 先按原样尝试，再尝试补 .md 扩展。
-    const candidates = cleanRef.endsWith(".md") ? [cleanRef] : [cleanRef + ".md", cleanRef];
+    const candidates = cleanRef.endsWith(".md")
+      ? [cleanRef]
+      : [cleanRef + ".md", cleanRef];
     for (const c of candidates) {
       const safe = resolve(wikiDir, c);
       if (safe !== wikiDir && !safe.startsWith(wikiDirSep)) continue;
@@ -1173,7 +1466,10 @@ export class WikiService {
     }
     if (opts.allowMissing) {
       // 没匹配 .md 候选时，强制补 .md
-      const safe = resolve(wikiDir, cleanRef.endsWith(".md") ? cleanRef : cleanRef + ".md");
+      const safe = resolve(
+        wikiDir,
+        cleanRef.endsWith(".md") ? cleanRef : cleanRef + ".md",
+      );
       if (safe === wikiDir || !safe.startsWith(wikiDirSep)) return null;
       return safe;
     }
@@ -1190,13 +1486,23 @@ export class WikiService {
 
   private isForbiddenPageRef(ref: string): boolean {
     const cleanRef = ref.replace(/^wiki\//, "").replace(/\.md$/, "");
-    return PAGE_FORBIDDEN_REFS.has(cleanRef) || PAGE_FORBIDDEN_REFS.has(`wiki/${cleanRef}`);
+    return (
+      PAGE_FORBIDDEN_REFS.has(cleanRef) ||
+      PAGE_FORBIDDEN_REFS.has(`wiki/${cleanRef}`)
+    );
   }
 
   private scanPagesRecursive(
     baseDir: string,
     dir: string,
-    out: { id: string; title: string; type: string; path: string; description?: string; locked?: boolean }[],
+    out: {
+      id: string;
+      title: string;
+      type: string;
+      path: string;
+      description?: string;
+      locked?: boolean;
+    }[],
   ): void {
     if (!existsSync(dir)) return;
     for (const entry of readdirSync(dir)) {
@@ -1239,8 +1545,16 @@ export class WikiService {
     // 代际 version 随任务一起入队：runBuild 用它与 cancelled 标记比对，
     // 使 replace 新入队的任务（version 更大）不会被旧代际的标记误伤。
     const version = row.version;
-    this.queue.enqueue(row.wiki_id, () =>
-      this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name, version),
+    this.queue.enqueue(
+      row.wiki_id,
+      async () =>
+        await this.runBuild(
+          row.service_id,
+          row.wiki_id,
+          row.team_id,
+          row.name,
+          version,
+        ),
     );
   }
 
@@ -1253,13 +1567,13 @@ export class WikiService {
   ): Promise<void> {
     // 入口检查点：pending 期间被中止 → 跳过，不置 processing、不 ingest。
     // preserveRaw 由触发源决定：replace（行仍在）保留 raw，delete（行已删）硬删。
-    if (this.isDeleted(serviceId, wikiId, version)) {
-      this.finishCancelled(serviceId, teamId, wikiId, {
-        preserveRaw: this.isCancelledByReplace(serviceId, wikiId),
+    if (await this.isDeleted(serviceId, wikiId, version)) {
+      await this.finishCancelled(serviceId, teamId, wikiId, {
+        preserveRaw: await this.isCancelledByReplace(serviceId, wikiId),
       });
       return;
     }
-    this.store.updateWikiStatus(serviceId, wikiId, {
+    await this.store.updateWikiStatus(serviceId, wikiId, {
       status: "processing",
       internal_status: "scanning",
       sync_error: null,
@@ -1273,48 +1587,69 @@ export class WikiService {
         teamId,
         name,
         dir: this.dirFor(serviceId, teamId, wikiId),
-        setInternalStatus: (s) =>
-          this.store.updateWikiStatus(serviceId, wikiId, { status: "processing", internal_status: s }),
+        setInternalStatus: async (s) =>
+          await this.store.updateWikiStatus(serviceId, wikiId, {
+            status: "processing",
+            internal_status: s,
+          }),
         ingestRunId,
       });
       // 结束前检查点：processing 期间被中止 → 跳过 ready/audit/回调，幂等收尾。
-      if (this.isDeleted(serviceId, wikiId, version)) {
-        this.finishCancelled(serviceId, teamId, wikiId, {
-          preserveRaw: this.isCancelledByReplace(serviceId, wikiId),
+      if (await this.isDeleted(serviceId, wikiId, version)) {
+        await this.finishCancelled(serviceId, teamId, wikiId, {
+          preserveRaw: await this.isCancelledByReplace(serviceId, wikiId),
         });
         return;
       }
-      this.store.updateWikiStatus(serviceId, wikiId, {
+      await this.artifactStore?.checkpoint(
+        this.dirFor(serviceId, teamId, wikiId),
+      );
+      await this.store.updateWikiStatus(serviceId, wikiId, {
         status: "ready",
         internal_status: null,
         sync_error: null,
         page_count: result?.pageCount ?? null,
         last_sync_at: new Date().toISOString(),
       });
-      const synced = this.store.getWikiById(serviceId, wikiId);
+      const synced = await this.store.getWikiById(serviceId, wikiId);
       if (synced) {
-        this.audit(synced, "ready", result?.pageCount != null ? `pages: ${result.pageCount}` : null);
+        await this.audit(
+          synced,
+          "ready",
+          result?.pageCount != null ? `pages: ${result.pageCount}` : null,
+        );
       }
-      this.logger?.info?.(`[wiki] ${wikiId} ready (pages: ${result?.pageCount ?? '?'})`);
+      this.logger?.info?.(
+        `[wiki] ${wikiId} ready (pages: ${result?.pageCount ?? "?"})`,
+      );
 
       // Auto-generate summary + callback TMC
       await this.onBuildComplete(synced, "ready", null, ingestRunId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactLogText(
+        err instanceof Error ? err.message : String(err),
+      );
       // worker 抛错，但若期间已被中止，视为取消而非失败：跳过 failed 状态/回调，做收尾。
-      if (this.isDeleted(serviceId, wikiId, version)) {
-        this.finishCancelled(serviceId, teamId, wikiId, {
-          preserveRaw: this.isCancelledByReplace(serviceId, wikiId),
+      if (await this.isDeleted(serviceId, wikiId, version)) {
+        await this.finishCancelled(serviceId, teamId, wikiId, {
+          preserveRaw: await this.isCancelledByReplace(serviceId, wikiId),
         });
         return;
       }
-      this.store.updateWikiStatus(serviceId, wikiId, {
+      try {
+        await this.artifactStore?.checkpoint(
+          this.dirFor(serviceId, teamId, wikiId),
+        );
+      } catch {
+        /* report original worker or PG error below */
+      }
+      await this.store.updateWikiStatus(serviceId, wikiId, {
         status: "failed",
         internal_status: null,
         sync_error: msg.slice(0, 500),
       });
-      const failed = this.store.getWikiById(serviceId, wikiId);
-      if (failed) this.audit(failed, "failed", msg.slice(0, 500));
+      const failed = await this.store.getWikiById(serviceId, wikiId);
+      if (failed) await this.audit(failed, "failed", msg.slice(0, 500));
       this.logger?.warn?.(`[wiki] ${wikiId} failed: ${msg}`);
 
       // Callback TMC about failure
@@ -1339,18 +1674,25 @@ export class WikiService {
     if (status === "ready") {
       // Generate summary via LLM (即使部分源失败也尝试生成——只要有页面就生成)
       try {
-        const pages = this.pageLs(row.service_id, row.team_id, row.wiki_id) ?? [];
-        this.logger?.info?.(`[wiki] summary generation start (wikiId=${row.wiki_id}, pages=${pages.length}, status=${status})`);
+        const pages =
+          (await this.pageLs(row.service_id, row.team_id, row.wiki_id)) ?? [];
+        this.logger?.info?.(
+          `[wiki] summary generation start (wikiId=${row.wiki_id}, pages=${pages.length}, status=${status})`,
+        );
         const { generateWikiSummary } = await import("../callback.js");
         summary = await generateWikiSummary(
           row.wiki_id,
           row.name,
           pages.map((p) => ({ title: p.title, description: p.description })),
-          this.callbackConfig.resolveLlm(row.service_id),
+          await this.callbackConfig.resolveLlm(row.service_id),
         );
-        this.logger?.info?.(`[wiki] summary generation done (wikiId=${row.wiki_id}, len=${summary?.length ?? 0}, empty=${!summary})`);
+        this.logger?.info?.(
+          `[wiki] summary generation done (wikiId=${row.wiki_id}, len=${summary?.length ?? 0}, empty=${!summary})`,
+        );
         if (summary) {
-          this.store.updateWikiStatus(row.service_id, row.wiki_id, { summary });
+          await this.store.updateWikiStatus(row.service_id, row.wiki_id, {
+            summary,
+          });
         }
       } catch (err) {
         this.logger?.warn?.(`[wiki] summary generation failed: ${String(err)}`);
@@ -1382,7 +1724,12 @@ export class WikiService {
 // ─── 模块级 helper（不依赖 class state，便于单测） ───
 
 /** 极简 frontmatter 解析（取 title/type/description/locked），与 manager 一致风格。 */
-function parseFrontmatterMin(content: string): { title: string; type: string; description: string; locked: boolean } {
+function parseFrontmatterMin(content: string): {
+  title: string;
+  type: string;
+  description: string;
+  locked: boolean;
+} {
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
   const fm = fmMatch ? fmMatch[1] : "";
   const titleMatch = fm.match(/^title:\s*["']?(.+?)["']?\s*$/m);
@@ -1407,7 +1754,10 @@ function parseFrontmatterMin(content: string): { title: string; type: string; de
  * 返回 { content, lockedInjected }；lockedInjected 表示**本次**是否真正补/改了 locked
  * 字段（已是 true 也算 lockedInjected=false，因为没有改动）。
  */
-function injectLockedTrue(content: string): { content: string; lockedInjected: boolean } {
+function injectLockedTrue(content: string): {
+  content: string;
+  lockedInjected: boolean;
+} {
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n?/);
   if (!fmMatch) {
     const wrapped = `---\nlocked: true\n---\n${content.startsWith("\n") ? content.slice(1) : content}`;
@@ -1417,13 +1767,18 @@ function injectLockedTrue(content: string): { content: string; lockedInjected: b
   const lockedMatch = fmBody.match(/^locked:\s*(true|false)\s*$/m);
   if (lockedMatch) {
     if (lockedMatch[1] === "true") return { content, lockedInjected: false };
-    const newFmBody = fmBody.replace(/^locked:\s*(true|false)\s*$/m, "locked: true");
+    const newFmBody = fmBody.replace(
+      /^locked:\s*(true|false)\s*$/m,
+      "locked: true",
+    );
     return {
       content: content.replace(fmBody, newFmBody),
       lockedInjected: true,
     };
   }
-  const newFmBody = fmBody.endsWith("\n") ? `${fmBody}locked: true` : `${fmBody}\nlocked: true`;
+  const newFmBody = fmBody.endsWith("\n")
+    ? `${fmBody}locked: true`
+    : `${fmBody}\nlocked: true`;
   return {
     content: content.replace(fmBody, newFmBody),
     lockedInjected: true,

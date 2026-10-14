@@ -3,7 +3,7 @@
  *
  * 主键：(service_id, resource_type, resource_id)。凭据挂在资源上，与用户解耦。
  * 存储：`cred_secret` 用 base64（非加密），使用时在内存解码，明文永不出 KS。
- * 保密性由文件权限 + 接口不回吐 + 明文不进日志承担，见 §4.1.3。
+ * 保密性由数据库访问权限 + 接口不回吐 + 明文不进日志承担，见 §4.1.3。
  */
 
 import { and, eq } from "drizzle-orm";
@@ -56,12 +56,11 @@ export function createCredentialStore(opts: CredentialStoreOptions): ICredential
   });
 
   return {
-    get(ref) {
-      const row = db
+    async get(ref) {
+      const row = (await db
         .select()
         .from(knowledgeSourceCredential)
-        .where(whereRef(ref))
-        .get();
+        .where(whereRef(ref)).limit(1))[0];
       if (!row) return null;
 
       // decode 失败 → null（当作未配置），不抛异常。避免损坏内容被当有效令牌用去 clone。
@@ -94,7 +93,7 @@ export function createCredentialStore(opts: CredentialStoreOptions): ICredential
       };
     },
 
-    put(ref, cred, providerId, updatedBy) {
+    async put(ref, cred, providerId, updatedBy) {
       if (!cred.secret) throw new Error("credential secret must be non-empty");
       const credSecret = encodeSecret(cred.secret);
       const extraJson =
@@ -117,7 +116,7 @@ export function createCredentialStore(opts: CredentialStoreOptions): ICredential
         updatedAt: ts,
       };
 
-      db.insert(knowledgeSourceCredential)
+      await db.insert(knowledgeSourceCredential)
         .values(values)
         .onConflictDoUpdate({
           target: [
@@ -134,8 +133,7 @@ export function createCredentialStore(opts: CredentialStoreOptions): ICredential
             updatedBy: values.updatedBy,
             updatedAt: values.updatedAt,
           },
-        })
-        .run();
+        }).execute();
 
       // 日志绝不带 secret / cred_secret；仅记归属。
       log.info("credential saved", {
@@ -146,13 +144,13 @@ export function createCredentialStore(opts: CredentialStoreOptions): ICredential
       });
     },
 
-    delete(ref) {
-      const res = db.delete(knowledgeSourceCredential).where(whereRef(ref)).run();
-      return (res.changes ?? 0) > 0;
+    async delete(ref) {
+      const res = await db.delete(knowledgeSourceCredential).where(whereRef(ref)).execute();
+      return (res.rowCount ?? 0) > 0;
     },
 
-    status(ref) {
-      const row = db
+    async status(ref) {
+      const row = (await db
         .select({
           resourceType: knowledgeSourceCredential.resourceType,
           resourceId: knowledgeSourceCredential.resourceId,
@@ -162,28 +160,25 @@ export function createCredentialStore(opts: CredentialStoreOptions): ICredential
           updatedAt: knowledgeSourceCredential.updatedAt,
         })
         .from(knowledgeSourceCredential)
-        .where(whereRef(ref))
-        .get();
+        .where(whereRef(ref)).limit(1))[0];
       return row ? rowToStatus(row) : null;
     },
 
-    listAllByType(type) {
-      const rows = db
+    async listAllByType(type) {
+      const rows = await db
         .select({
           serviceId: knowledgeSourceCredential.serviceId,
           resourceId: knowledgeSourceCredential.resourceId,
         })
         .from(knowledgeSourceCredential)
-        .where(eq(knowledgeSourceCredential.resourceType, type))
-        .all();
+        .where(eq(knowledgeSourceCredential.resourceType, type));
       return rows.map((r) => ({ serviceId: r.serviceId, resourceId: r.resourceId }));
     },
 
-    recordVerify(ref) {
-      db.update(knowledgeSourceCredential)
+    async recordVerify(ref) {
+      await db.update(knowledgeSourceCredential)
         .set({ lastVerifiedAt: nowIso(), updatedAt: nowIso() })
-        .where(whereRef(ref))
-        .run();
+        .where(whereRef(ref)).execute();
     },
   };
 }

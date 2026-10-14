@@ -12,6 +12,8 @@
  */
 
 import path from "node:path";
+import { PostgresMemoryStore } from "./postgres/memory-store.js";
+import { PostgresDatabase } from "./postgres/client.js";
 import type { MemoryTdaiConfig } from "../../config.js";
 import type { IMemoryStore, IEmbeddingService, StoreLogger } from "./types.js";
 import { VectorStore } from "./sqlite/memory-store.js";
@@ -55,6 +57,12 @@ export function createStoreBundle(
   const bm25Encoder = createBM25Encoder(config.bm25, logger);
 
   switch (config.storeBackend) {
+    case "postgres": {
+      const embedding = createPostgresEmbedding(config, logger);
+      const db = PostgresDatabase.connect(config.postgres.url, config.postgres.instanceId);
+      return { store: new PostgresMemoryStore({ db, dimensions: config.embedding.dimensions, logger }), embedding,
+        storeSnapshot: { type: "postgres", postgresSchema: db.schema } };
+    }
     case "tcvdb": {
       const tcvdbCfg = config.tcvdb;
       if (!tcvdbCfg.url || !tcvdbCfg.apiKey) {
@@ -165,4 +173,14 @@ export function createStoreBundle(
       };
     }
   }
+}
+
+/** PostgreSQL never downloads a local embedding model or falls back to local inference. */
+export function createPostgresEmbedding(config: MemoryTdaiConfig, logger?: StoreLogger): EmbeddingService {
+  const emb = config.embedding;
+  if (!emb.enabled || ["local", "none"].includes(emb.provider) || !emb.apiKey || !emb.baseUrl || !emb.model || emb.dimensions < 1) {
+    throw new Error("PostgreSQL requires explicit remote API-key embedding configuration");
+  }
+  return createEmbeddingService({ provider: emb.provider, apiKey: emb.apiKey, baseUrl: emb.baseUrl, model: emb.model,
+    dimensions: emb.dimensions, sendDimensions: emb.sendDimensions, maxInputChars: emb.maxInputChars }, logger);
 }

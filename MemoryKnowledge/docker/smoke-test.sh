@@ -178,7 +178,7 @@ check_api_envelope "POST /wiki/list" POST "/wiki/list" "{\"team_id\":\"$TEAM_ID\
 # 4. Code-graph list (empty OK)
 check_api_envelope "POST /code-graph/list" POST "/code-graph/list" "{\"team_id\":\"$TEAM_ID\"}" 200 >/dev/null || true
 
-# 5. Wiki create → get → delete (SQLite + routes)
+# 5. Wiki create → get → delete (PostgreSQL + routes)
 SMOKE_NAME="smoke-$(date +%s)"
 create_resp=$(check_api_envelope "POST /wiki/create" POST "/wiki/create" \
   "{\"team_id\":\"$TEAM_ID\",\"name\":\"$SMOKE_NAME\",\"user_id\":\"smoke-user\"}" 200) || \

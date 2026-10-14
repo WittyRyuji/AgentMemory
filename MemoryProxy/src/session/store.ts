@@ -84,6 +84,8 @@ export class SessionStore {
     this.bindingRepo = bindingRepo;
   }
 
+  setSessionRepo(repo: SessionRepo): void { this.repo = repo; }
+
   /** Attach BindingRepo late (called after Redis / storage activation). */
   setBindingRepo(repo: BindingRepo): void {
     this.bindingRepo = repo;
@@ -125,7 +127,8 @@ export class SessionStore {
     if (state.status !== "initialized" && Date.now() - state.startedAt > this.ttlMs) {
       this.states.delete(keyId);
       const id = this.identities.get(keyId);
-      if (id) this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+      if (id) void Promise.resolve(this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId))
+        .catch(() => console.warn('[session] expired session cleanup failed'));
       return undefined;
     }
 
@@ -207,6 +210,7 @@ export class SessionStore {
       try {
         await this.repo.upsert(spaceOf(id), id.userId, id.agentSource, id.sessionId, state);
       } catch (err) {
+        if (this.repo.strictPersistence) { this.states.delete(keyId); throw err; }
         console.warn(
           `[session] L2a upsert failed for ${keyId}: ` +
             (err instanceof Error ? err.message : String(err)),
@@ -243,6 +247,7 @@ export class SessionStore {
       try {
         await this.bindingRepo.putBinding(spaceOf(id), id.sessionId, binding);
       } catch (err) {
+        if (this.bindingRepo.strictPersistence) { this.states.delete(keyId); throw err; }
         console.warn(
           `[session] L2b binding write failed for ${keyId}: ` +
             (err instanceof Error ? err.message : String(err)),
@@ -251,14 +256,14 @@ export class SessionStore {
     }
   }
 
-  delete(keyId: string): void {
+  async delete(keyId: string): Promise<void> {
     this.states.delete(keyId);
     const id = this.identities.get(keyId);
     if (!id) return;
-    this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
-    void this.bindingRepo
+    await this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+    await this.bindingRepo
       ?.deleteBinding(spaceOf(id), id.sessionId)
-      .catch(() => {});
+      .catch((err) => { if (this.bindingRepo?.strictPersistence) throw err; });
   }
 
   getStatus(keyId: string): SessionInitStatus {
@@ -271,7 +276,8 @@ export class SessionStore {
       if (state.status !== "initialized" && now - state.startedAt > this.ttlMs) {
         this.states.delete(keyId);
         const id = this.identities.get(keyId);
-        if (id) this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+        if (id) void Promise.resolve(this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId))
+        .catch(() => console.warn('[session] expired session cleanup failed'));
       }
     }
   }
@@ -373,6 +379,7 @@ export class SessionStore {
         console.log(`[cache] session=${keyId} L2a hit → promote L1${stale}`);
         return this.tagRecoverySource(l2a, "l2a");
       }
+      if (this.repo.strictPersistence) this.states.delete(keyId);
     }
 
     // Step 2.5: L2a miss 时的 L1 降级兜底。
@@ -383,7 +390,7 @@ export class SessionStore {
     //
     // zombie / user-mismatch 已在 `this.get()` 与 `probeL2a` 内部各自 invalidate，
     // 走到这里的 l1 一定是 fresh + user 匹配的。
-    if (l1) {
+    if (l1 && !this.repo?.strictPersistence) {
       console.log(`[cache] session=${keyId} L1 fallback (L2a miss, status=${l1.status})`);
       return this.tagRecoverySource(l1, "l1");
     }
@@ -397,7 +404,8 @@ export class SessionStore {
     let binding: SessionBinding | null;
     try {
       binding = await this.bindingRepo.getBinding(spaceOf(identity), identity.sessionId);
-    } catch {
+    } catch (err) {
+      if (this.bindingRepo.strictPersistence) throw err;
       binding = null;
     }
     if (!binding) {
@@ -461,6 +469,7 @@ export class SessionStore {
         identity.sessionId,
       );
     } catch (err) {
+      if (this.repo?.strictPersistence) throw err;
       // 诊断: probeL2a 报错时也 log，之前静默吞掉导致多节点 L2 miss 无迹可循
       console.log(
         `[cache] session=${keyId} L2a probe error space=${spaceOf(identity)} user=${identity.userId} src=${identity.agentSource} sid=${identity.sessionId}: ${(err as Error).message}`,
@@ -486,9 +495,9 @@ export class SessionStore {
         `[session-recover] ${keyId} L2a pending expired (status=${row.status}, age=${Date.now() - row.startedAt}ms), invalidating`,
       );
       try {
-        this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
-      } catch {
-        /* best-effort */
+        await this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
+      } catch (err) {
+        if (this.repo?.strictPersistence) throw err;
       }
       return undefined;
     }
@@ -499,9 +508,9 @@ export class SessionStore {
         `[session-recover] ${keyId} L2a user mismatch (stored=${storedUserId}, current=${identity.userId}), invalidating`,
       );
       try {
-        this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
-      } catch {
-        /* best-effort */
+        await this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
+      } catch (err) {
+        if (this.repo?.strictPersistence) throw err;
       }
       return undefined;
     }
@@ -656,6 +665,7 @@ export class SessionStore {
       try {
         await this.repo.upsert(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId, rebuilt);
       } catch (err) {
+        if (this.repo.strictPersistence) { this.states.delete(keyId); throw err; }
         console.warn(
           `[session-recover] L2a upsert failed for ${keyId} during rebuild: ` +
             (err instanceof Error ? err.message : String(err)),

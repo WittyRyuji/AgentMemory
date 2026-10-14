@@ -23,6 +23,7 @@ export function dbChoiceToStoreConfigs(db: DbChoice): StoreBackendConfigs {
       return { vdbConfig: null, mongoConfig: db.conn };
     case "tcvdb":
       return { vdbConfig: db.conn, mongoConfig: null };
+    case "postgres":
     case "sqlite":
       return { vdbConfig: null, mongoConfig: null };
   }

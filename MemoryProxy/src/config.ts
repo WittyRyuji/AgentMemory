@@ -334,6 +334,10 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
   const configPath = overrides.configFile || "config.yaml";
   const yaml = loadYamlConfig(configPath);
   const defaultWecomIdentity = DEFAULT_CONFIG.wecomIdentity!;
+  const storageBackend = process.env.PROXY_STORAGE_BACKEND?.trim() || yaml.storage?.backend || DEFAULT_CONFIG.storage.backend;
+  if (!['postgres', 'cos', 'sqlite', 'fs', 'memory'].includes(storageBackend)) throw new Error('invalid PROXY_STORAGE_BACKEND');
+  const postgresUrl = process.env.PROXY_POSTGRES_URL?.trim() || process.env.DATABASE_URL?.trim() || yaml.storage?.postgres?.url || '';
+  if (storageBackend === 'postgres' && !postgresUrl) throw new Error('PROXY_POSTGRES_URL or DATABASE_URL is required');
 
   const selection = buildSelectionConfig(yaml.selection, configPath);
   const skillSelection = buildSkillSelectionConfig(yaml.skillRuntime?.selection);
@@ -426,8 +430,9 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
       qpm: Math.max(0, yaml.rateLimit?.qpm ?? DEFAULT_CONFIG.rateLimit.qpm),
     },
     storage: {
-      enabled: yaml.storage?.enabled ?? DEFAULT_CONFIG.storage.enabled,
-      backend: yaml.storage?.backend ?? DEFAULT_CONFIG.storage.backend,
+      enabled: storageBackend === 'postgres' ? true : (yaml.storage?.enabled ?? DEFAULT_CONFIG.storage.enabled),
+      backend: storageBackend as ProxyConfig['storage']['backend'],
+      postgres: { url: postgresUrl },
       ttlDays: yaml.storage?.ttlDays ?? DEFAULT_CONFIG.storage.ttlDays,
       cos: {
         rootPrefix: yaml.storage?.cos?.rootPrefix ?? DEFAULT_CONFIG.storage.cos.rootPrefix,

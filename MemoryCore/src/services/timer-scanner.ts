@@ -140,7 +140,16 @@ export class TimerScanner {
       const now = Date.now();
       let totalEnqueued = 0;
 
-      for (let shard = 0; shard < shardCount; shard++) {
+      const durable = this.backend as typeof this.backend & { dispatchExpiredTimers?: (makeTask: (entry: TimerEntry) => TaskPayload) => Promise<number> };
+      if (durable.dispatchExpiredTimers) {
+        totalEnqueued = await durable.dispatchExpiredTimers((entry) => {
+          const { instanceId, sessionId, taskType, priority, timerType, teamId, agentId } = this.parseShardMember(entry.member);
+          return { id: `${taskType}-${instanceId}-${sessionId}-${now}`, type: taskType, instanceId, sessionId,
+            teamId, agentId, priority, createdAt: now,
+            data: { triggeredBy: "timer_scanner", timerMember: `${sessionId}:${timerType}`, instanceId, teamId, agentId } };
+        });
+      }
+      for (let shard = 0; !durable.dispatchExpiredTimers && shard < shardCount; shard++) {
         const rb = this.backend as any;
         let expired: TimerEntry[];
 

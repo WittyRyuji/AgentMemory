@@ -72,7 +72,8 @@ export interface StorageConfig {
   /** 总开关。false = 完全走原 Redis 路径，本次迁移代码等同于未加载。 */
   enabled: boolean;
   /** 优选后端；init 失败按 cos → sqlite → fs → memory 顺序降级。 */
-  backend: "cos" | "sqlite" | "fs" | "memory";
+  backend: "postgres" | "cos" | "sqlite" | "fs" | "memory";
+  postgres?: { url: string };
   /**
    * `ttl/` 前缀下对象的生存期（天）。只对 ttl 前缀生效，nottl 完全不受影响。
    * 默认 7 天，与 COS lifecycle rule 的粒度对齐（COS 天级扫描）。
@@ -996,7 +997,8 @@ export interface RawYamlConfig {
   };
   storage?: {
     enabled?: boolean;
-    backend?: "cos" | "sqlite" | "fs" | "memory";
+    backend?: "postgres" | "cos" | "sqlite" | "fs" | "memory";
+    postgres?: { url?: string };
     ttlDays?: number;
     cos?: {
       rootPrefix?: string;

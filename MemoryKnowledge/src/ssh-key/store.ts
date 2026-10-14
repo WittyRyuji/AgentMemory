@@ -1,3 +1,4 @@
+import type { PostgresArtifactStore } from "../db/artifact-store.js";
 /**
  * SshKeyStore —— 每用户 SSH 密钥对的落盘实现。
  *
@@ -39,6 +40,7 @@ export class SshKeygenError extends Error {
 }
 
 export interface SshKeyStoreOptions {
+  artifactStore?: PostgresArtifactStore;
   /** 密钥根目录（已由 config 解析出绝对路径）。 */
   rootDir: string;
   /** RSA 位数，默认 4096。 */
@@ -50,12 +52,14 @@ const KEYGEN_TIMEOUT_MS = 30_000;
 
 export class SshKeyStore implements ISshKeyStore {
   private readonly rootDir: string;
+  private readonly artifactStore?: PostgresArtifactStore;
   private readonly bits: number;
   /** (serviceId, username) → in-flight ensure Promise，防并发重复生成。 */
   private readonly inFlight = new Map<string, Promise<SshKeyInfo>>();
 
   constructor(opts: SshKeyStoreOptions) {
     this.rootDir = opts.rootDir;
+    this.artifactStore = opts.artifactStore;
     this.bits = opts.bits ?? 4096;
   }
 
@@ -69,6 +73,10 @@ export class SshKeyStore implements ISshKeyStore {
     });
     this.inFlight.set(cacheKey, task);
     return task;
+  }
+
+  async checkpoint(serviceId: string): Promise<void> {
+    await this.artifactStore?.checkpoint(this.dirFor(serviceId));
   }
 
   get(serviceId: string, username: string): SshKeyInfo | null {
@@ -140,7 +148,10 @@ export class SshKeyStore implements ISshKeyStore {
 
     const base = this.resolveBaseName(serviceId, username);
     const already = this.readExisting(serviceId, base);
-    if (already) return already;
+    if (already) {
+      await this.artifactStore?.checkpoint(dir);
+      return already;
+    }
 
     const keyPath = this.pathFor(serviceId, base);
     const pubPath = this.pathFor(serviceId, `${base}.pub`);
@@ -201,6 +212,7 @@ export class SshKeyStore implements ISshKeyStore {
       /* ignore */
     }
 
+    await this.artifactStore?.checkpoint(dir);
     const publicKey = readFileSync(pubPath, "utf8").trim();
     log.info("ssh-key generated", { serviceId, username, base });
 

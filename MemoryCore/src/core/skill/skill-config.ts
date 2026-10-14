@@ -74,7 +74,7 @@ export function resolveSkillConfig(
   // --------------- store ---------------
   const requestedStore =
     input.storeBackend ?? probe.outerStoreBackend ?? "sqlite";
-  let storeBackend: "sqlite" | "tcvdb" | "mongodb" = requestedStore;
+  let storeBackend: "sqlite" | "tcvdb" | "mongodb" | "postgres" = requestedStore;
   if (storeBackend === "tcvdb" && !probe.hasTcvdbCredentials) {
     degradations.push({
       field: "storeBackend",
@@ -91,8 +91,14 @@ export function resolveSkillConfig(
 
   // --------------- content ---------------
   const explicitContent = input.contentBackend;
-  let contentBackend: "local" | "cos";
-  if (explicitContent === "cos") {
+  let contentBackend: "local" | "cos" | "postgres";
+  if (probe.outerStoreBackend === "postgres") {
+    if (input.storeBackend && input.storeBackend !== "postgres") throw new Error("PostgreSQL mode requires PostgreSQL skills");
+    if (explicitContent && explicitContent !== "postgres") throw new Error("PostgreSQL mode requires PostgreSQL skill resources");
+    contentBackend = "postgres";
+  } else if (explicitContent === "postgres") {
+    throw new Error("PostgreSQL skill resources require PostgreSQL memory storage");
+  } else if (explicitContent === "cos") {
     if (probe.hasCosCredentials) {
       contentBackend = "cos";
     } else if (strictMode) {

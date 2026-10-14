@@ -4,7 +4,7 @@
 set -euo pipefail
 
 DATA_DIR="${KNOWLEDGE_DATA_DIR:-/app/data}"
-DB_PATH="${KNOWLEDGE_DB_PATH:-/app/data/knowledge.db}"
+
 PORT="${PORT:-8421}"
 SKIP_LLM_CHECK=0
 REQUIRE_TMC=0
@@ -45,7 +45,7 @@ Optional:
 Same settings via environment (-e), flags override unset env:
   KNOWLEDGE_PUBLIC_BASE_URL, TMC_CALLBACK_URL,
   LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_MODE,
-  PORT, KNOWLEDGE_DATA_DIR, KNOWLEDGE_DB_PATH
+  PORT, KNOWLEDGE_DATA_DIR, KNOWLEDGE_POSTGRES_URL (required)
 
 Examples:
   # Full (wiki + code-graph + TMC callback)
@@ -221,7 +221,10 @@ main() {
 
   export PORT
   export KNOWLEDGE_DATA_DIR="$DATA_DIR"
-  export KNOWLEDGE_DB_PATH="$DB_PATH"
+  if [[ -z "${KNOWLEDGE_POSTGRES_URL:-${DATABASE_URL:-}}" ]]; then
+    echo "error: KNOWLEDGE_POSTGRES_URL is required (PostgreSQL durable store)" >&2
+    exit 1
+  fi
   export NODE_ENV="${NODE_ENV:-production}"
   export LOG_LEVEL="${LOG_LEVEL:-info}"
   export LLM_MODE="${LLM_MODE:-proxy}"

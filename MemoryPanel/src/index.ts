@@ -4,4 +4,7 @@ import { config as loadDotenv } from 'dotenv';
 loadDotenv();
 
 import { main } from './panel/index.js';
-main();
+main().catch(() => {
+  console.error('Panel startup failed; check configuration and PostgreSQL availability');
+  process.exit(1);
+});

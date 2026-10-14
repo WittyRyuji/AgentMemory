@@ -260,6 +260,7 @@ export class TdaiCore {
 
     // Initialize stores (async)
     this.storeReady = this.initStores();
+    if (this.cfg.storeBackend === "postgres") await this.storeReady;
 
     // Create pipeline manager (sync — does not need store)
     if (this.cfg.extraction.enabled) {
@@ -627,6 +628,7 @@ export class TdaiCore {
       this.embeddingService = stores.embeddingService;
       this.logger.debug?.(`${TAG} Stores initialized: backend=${this.cfg.storeBackend}, embedding=${this.cfg.embedding.provider}`);
     } catch (err) {
+      if (this.cfg.storeBackend === "postgres") throw err;
       this.logger.warn(
         `${TAG} Store init failed; recall/dedup degraded: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -872,31 +874,30 @@ export class TdaiCore {
       const resolved = resolveSkillConfig(this.cfg.skill, probe, resolverLogger);
       this.resolvedSkillConfig = resolved;
 
-      // Open the underlying DatabaseSync (raw handle escape hatch — see
-      // VectorStore.getRawDb() docstring). Skill tables (skill_meta /
-      // skill_fts / skill_vec / task_*) live in the SAME connection.
-      const rawDbCarrier = this.vectorStore as unknown as {
-        getRawDb?: () => unknown;
-        getEmbeddingDimensions?: () => number;
-      };
-      if (typeof rawDbCarrier.getRawDb !== "function") {
-        this.logger.warn(
-          `${TAG} Skill wiring skipped: vectorStore does not expose getRawDb() (only SQLite-backed VectorStore is supported in MVP)`,
-        );
-        return;
+      let skillStore: import("./skill/skill-store.interface.js").ISkillStore;
+      if (this.cfg.storeBackend === "postgres") {
+        const { PostgresSkillStore } = await import("./store/postgres/skill-store.js");
+        const memory = this.vectorStore as import("./store/postgres/memory-store.js").PostgresMemoryStore;
+        if (!this.embeddingService) throw new Error("PostgreSQL skill storage requires external embeddings");
+        const postgres = new PostgresSkillStore(memory.getPostgresDatabase(), this.embeddingService);
+        await postgres.initialize();
+        skillStore = postgres;
+      } else {
+        const rawDbCarrier = this.vectorStore as unknown as {
+          getRawDb?: () => unknown;
+          getEmbeddingDimensions?: () => number;
+        };
+        if (typeof rawDbCarrier.getRawDb !== "function") {
+          this.logger.warn(`${TAG} Skill wiring deferred to the gateway for this backend`);
+          return;
+        }
+        skillStore = new SqliteSkillStore({
+          db: rawDbCarrier.getRawDb() as import("node:sqlite").DatabaseSync,
+          dimensions: rawDbCarrier.getEmbeddingDimensions?.() ?? this.cfg.embedding.dimensions ?? 0,
+          logger: this.logger,
+        });
+        skillStore.init();
       }
-      const db = rawDbCarrier.getRawDb() as import("node:sqlite").DatabaseSync;
-      const dimensions =
-        typeof rawDbCarrier.getEmbeddingDimensions === "function"
-          ? rawDbCarrier.getEmbeddingDimensions()
-          : (this.cfg.embedding.dimensions ?? 0);
-
-      const skillStore = new SqliteSkillStore({
-        db,
-        dimensions,
-        logger: this.logger,
-      });
-      skillStore.init();
 
       const skillResources = new SkillResourceStore({
         storage: this.storage,

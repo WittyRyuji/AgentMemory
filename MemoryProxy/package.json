@@ -10,7 +10,8 @@
     "dev:config": "node --import tsx/esm --watch src/index.ts --config config.yaml",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate:postgres": "node --import tsx/esm scripts/migrate-postgres.ts"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.5.0",
@@ -29,7 +30,8 @@
     "hono": "^4.7.10",
     "ioredis": "^5.11.1",
     "js-yaml": "^4.1.0",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "pg": "^8.16.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
@@ -37,6 +39,8 @@
     "@types/node": "^22.15.29",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
-    "vitest": "^3.2.2"
+    "vitest": "^3.2.2",
+    "@types/pg": "^8.15.0",
+    "@electric-sql/pglite": "^0.5.9"
   }
 }

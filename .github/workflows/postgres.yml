@@ -1,0 +1,69 @@
+name: PostgreSQL migration
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/postgres-migration]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: postgres-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: agentmemory_test
+          POSTGRES_PASSWORD: test-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentmemory_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PG_TEST_URL: postgresql://postgres:test-only@127.0.0.1:5432/agentmemory_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Initialize pgvector once before concurrent suites
+        run: psql "$PG_TEST_URL" -c 'CREATE EXTENSION IF NOT EXISTS vector'
+      - name: Install Core dependencies without host agents or model downloads
+        working-directory: MemoryCore
+        run: |
+          npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+          npm install --no-save --legacy-peer-deps --ignore-scripts node-llama-cpp@3.16.2
+      - name: Core PostgreSQL contracts, migration and gateway wiring
+        working-directory: MemoryCore
+        run: |
+          npm run typecheck:postgres
+          npm run test:postgres
+          npm run build:plugin
+      - name: Install Knowledge dependencies and native derived graph index
+        working-directory: MemoryKnowledge
+        run: |
+          npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+          npm rebuild better-sqlite3
+      - name: Knowledge PostgreSQL, source restore and CodeGraph integration
+        working-directory: MemoryKnowledge
+        run: |
+          npm run typecheck
+          npm test
+          npm run build
+      - name: Panel PostgreSQL identities, templates and import
+        working-directory: MemoryPanel
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck
+          npm test -- --maxWorkers=1
+      - name: Proxy PostgreSQL state, limits, turns and import
+        working-directory: MemoryProxy
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm rebuild better-sqlite3
+          npm run typecheck
+          npm test -- --maxWorkers=1

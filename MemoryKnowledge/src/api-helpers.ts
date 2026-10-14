@@ -1,3 +1,4 @@
+import { redactLogText } from "./logger.js";
 /**
  * API helpers — IdFields extraction, envelope wrapping, Row→Detail serialization.
  *
@@ -82,6 +83,7 @@ export function wrapOk<T>(data: T, requestId?: string): ApiResponseEnvelope<T> {
 }
 
 export function wrapError(code: number, message: string, requestId?: string): ApiResponseEnvelope<null> {
+  message = redactLogText(message);
   return { code, message, ...(requestId ? { request_id: requestId } : {}), data: null };
 }
 

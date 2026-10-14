@@ -41,6 +41,7 @@ function mainKey(
 
 export class KvSessionRepo implements SessionRepo {
   constructor(private readonly storage: ProxyStorage) {}
+  get strictPersistence(): boolean { return this.storage.type === 'postgres'; }
 
   async upsert(
     spaceId: string,
@@ -55,6 +56,7 @@ export class KvSessionRepo implements SessionRepo {
     try {
       await this.storage.putJSON(key, state);
     } catch (err) {
+      if (this.strictPersistence) throw err;
       // 静默降级：L1 仍是权威 write-through 目标；L2a 写失败不阻塞主流程。
       const e = err as { statusCode?: number; code?: string; message?: string };
       console.warn(
@@ -74,26 +76,27 @@ export class KvSessionRepo implements SessionRepo {
       return await this.storage.getJSON<SessionInitState>(
         mainKey(spaceId, userId, agentSource, sessionId),
       );
-    } catch {
+    } catch (err) {
+      if (this.strictPersistence) throw err;
       return null;
     }
   }
 
-  deleteBySessionId(
+  async deleteBySessionId(
     spaceId: string,
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void {
-    this.storage
+  ): Promise<void> {
+    await this.storage
       .del(mainKey(spaceId, userId, agentSource, sessionId))
-      .catch(() => { /* silent */ });
+      .catch((err) => { if (this.strictPersistence) throw err; });
   }
 
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {
     // CosStorage 下关闭启动 hydrate —— 全量 listObjects 太慢且价值有限
     // （多节点下只能覆盖本节点第一个请求）。走 probeL2a 懒加载即可。
-    if (this.storage.type === "cos") return [];
+    if (this.storage.type === "cos" || this.storage.type === "postgres") return [];
 
     try {
       // listNames 传入 "ttl/" 前缀，返回的 name 是移除该前缀后的路径，
