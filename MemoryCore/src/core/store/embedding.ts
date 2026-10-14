@@ -183,7 +183,9 @@ export type ImportLlamaFn = () => Promise<{
   LlamaLogLevel: { error: number };
 }>;
 
-const defaultImportLlama: ImportLlamaFn = () => import("node-llama-cpp") as unknown as ReturnType<ImportLlamaFn>;
+// Optional runtime peer: remote-only builds must not need its package or native binaries.
+const llamaModuleName: string = "node-llama-cpp";
+const defaultImportLlama: ImportLlamaFn = () => import(llamaModuleName) as ReturnType<ImportLlamaFn>;
 
 export class LocalEmbeddingService implements EmbeddingService {
   private readonly modelPath: string;

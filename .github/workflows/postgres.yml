@@ -12,6 +12,10 @@ concurrency:
 jobs:
   native-postgres:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [MemoryCore, MemoryKnowledge, MemoryPanel, MemoryProxy]
     timeout-minutes: 30
     services:
       postgres:
@@ -32,35 +36,39 @@ jobs:
           node-version: "24"
       - name: Initialize pgvector once before concurrent suites
         run: psql "$PG_TEST_URL" -c 'CREATE EXTENSION IF NOT EXISTS vector'
-      - name: Install Core dependencies without host agents or model downloads
+      - name: Install Core dependencies without host agents or local models
+        if: matrix.module == 'MemoryCore'
         working-directory: MemoryCore
-        run: |
-          npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
-          npm install --no-save --legacy-peer-deps --ignore-scripts node-llama-cpp@3.16.2
+        run: npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
       - name: Core PostgreSQL contracts, migration and gateway wiring
+        if: matrix.module == 'MemoryCore'
         working-directory: MemoryCore
         run: |
           npm run typecheck:postgres
           npm run test:postgres
           npm run build:plugin
       - name: Install Knowledge dependencies and native derived graph index
+        if: matrix.module == 'MemoryKnowledge'
         working-directory: MemoryKnowledge
         run: |
           npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
           npm rebuild better-sqlite3
       - name: Knowledge PostgreSQL, source restore and CodeGraph integration
+        if: matrix.module == 'MemoryKnowledge'
         working-directory: MemoryKnowledge
         run: |
           npm run typecheck
           npm test
           npm run build
       - name: Panel PostgreSQL identities, templates and import
+        if: matrix.module == 'MemoryPanel'
         working-directory: MemoryPanel
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run typecheck
           npm test -- --maxWorkers=1
       - name: Proxy PostgreSQL state, limits, turns and import
+        if: matrix.module == 'MemoryProxy'
         working-directory: MemoryProxy
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
