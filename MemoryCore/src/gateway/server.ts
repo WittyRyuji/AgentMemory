@@ -1,3 +1,4 @@
+import { validateSeedOAuthOverride } from "../auth/oauth/config-policy.js";
 import { PostgresSkillAgentTaskQueue } from "../core/skill/conversation-add/postgres-agent-task-queue.js";
 /**
  * TDAI Gateway — HTTP server for the Hermes sidecar.
@@ -1698,6 +1699,9 @@ export class TdaiGateway {
   private async handleSeed(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const body = await parseJsonBody<SeedRequest>(req);
 
+    try { validateSeedOAuthOverride(this.config.llm.provider, body.config_override); }
+    catch { sendError(res, 400, "OAuth account and provider selection are operator settings, not seed request overrides"); return; }
+
     if (!body.data) {
       sendError(res, 400, "Missing required field: data");
       return;
@@ -1744,6 +1748,8 @@ export class TdaiGateway {
         ["enabled", true],
         ["baseUrl", this.config.llm.baseUrl],
         ["apiKey", this.config.llm.apiKey],
+        ["provider", this.config.llm.provider],
+        ["oauth", this.config.llm.oauth],
         ["model", this.config.llm.model],
         ["maxTokens", this.config.llm.maxTokens],
         ["timeoutMs", this.config.llm.timeoutMs],
@@ -1760,6 +1766,14 @@ export class TdaiGateway {
           pluginConfig[key] = overVal;
         }
       }
+    }
+
+    if (this.config.llm.provider === "oauth") {
+      // Pin trusted authentication selectors after the generic config merge, including
+      // null/non-object overrides. A seed caller cannot access another saved account.
+      const requested = pluginConfig.llm && typeof pluginConfig.llm === "object" && !Array.isArray(pluginConfig.llm)
+        ? pluginConfig.llm as Record<string, unknown> : {};
+      pluginConfig.llm = { ...requested, enabled: true, provider: "oauth", oauth: this.config.llm.oauth };
     }
 
     // Execute seed pipeline (blocking — this may take minutes for large inputs)
@@ -2236,6 +2250,8 @@ export class TdaiGateway {
         model: effective.model ?? "default",
         timeoutMs: effective.timeoutMs ?? 120_000,
         stream: effective.stream ?? false,
+        provider: effective.provider,
+        oauth: effective.oauth,
       },
     });
     const cfg = this.core.getResolvedSkillConfig();
@@ -3336,6 +3352,17 @@ export class TdaiGateway {
       return null;
     }
     const logger = this.logger;
+    if (effective.provider === "oauth") {
+      return {
+        async chat(params: { model: string; messages: Array<{ role: "system" | "user"; content: string }>; temperature: number; max_tokens: number; timeoutMs?: number }): Promise<string> {
+          const { StandaloneLLMRunner } = await import("../adapters/standalone/llm-runner.js");
+          return new StandaloneLLMRunner({ config: effective }).run({
+            taskId: "offload.oauth", systemPrompt: params.messages.filter(m => m.role === "system").map(m => m.content).join("\n"),
+            prompt: params.messages.filter(m => m.role === "user").map(m => m.content).join("\n"), timeoutMs: params.timeoutMs,
+          });
+        },
+      };
+    }
 
     return {
       async chat(params: {

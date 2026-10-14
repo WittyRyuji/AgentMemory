@@ -64,3 +64,6 @@ scripts/soak-*
 
 # 保留必要的 md 文件（被上面 *.md 排除了，但 README.md 等对运行无影响，不需要保留）
 # 如果需要在容器中读取 README.md，删除上面的 *.md 行
+
+# Never bake private database configuration into an image
+config/db.toml

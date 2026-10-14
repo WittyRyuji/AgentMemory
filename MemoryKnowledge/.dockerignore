@@ -9,3 +9,6 @@ __tests__
 .data-dir
 *.md
 docs
+
+# Never bake private database configuration into an image
+config/db.toml

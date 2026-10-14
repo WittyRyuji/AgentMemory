@@ -1,3 +1,4 @@
+import { createOAuthRuntime, parseOAuthConfig } from "../auth/oauth/runtime.js";
 /**
  * LLM provider 解析器 —— 将 yaml 中的 llm 段和 memory systemUser 组合成
  * 内核 runner 直接可用的 {baseUrl, apiKey, model, ...} 配置。
@@ -106,6 +107,7 @@ export function validateLlmProviderConfig(
   llm: StandaloneLLMConfig,
   metadata: GatewayMetadataConfig,
 ): void {
+  if (llm.provider === "oauth") { createOAuthRuntime(llm.oauth ?? parseOAuthConfig()); return; }
   if (llm.provider !== "proxy") return;
 
   if (!llm.baseUrl) {

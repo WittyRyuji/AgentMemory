@@ -94,7 +94,8 @@ export interface StandaloneLLMConfig {
    *   - "proxy":  走 context_proxy，运行时会自动把 baseUrl 拼成
    *               `${baseUrl}/proxy/<instanceId>/v1`，apiKey 用 metadata.systemUser.memory.userKey
    */
-  provider?: "openai" | "proxy";
+  provider?: "openai" | "proxy" | "oauth";
+  oauth?: import("../../auth/oauth/runtime.js").OAuthConfig;
   /** provider=proxy 时的可选配置。 */
   proxy?: {
     /** 是否用 memory systemUser.userKey 作为 Authorization（默认 true）。 */
@@ -115,12 +116,26 @@ export interface StandaloneLLMConfig {
 // Sandboxed tool execution helpers
 // ============================
 
-function resolveSandboxedPath(workspaceDir: string, relativePath: string): string | null {
-  const resolved = path.resolve(workspaceDir, relativePath);
-  if (!resolved.startsWith(path.resolve(workspaceDir))) {
-    return null;
-  }
-  return resolved;
+async function resolveSandboxedPath(workspaceDir: string, relativePath: string): Promise<string | null> {
+  const root = path.resolve(workspaceDir);
+  const resolved = path.resolve(root, relativePath);
+  const inside = (base: string, target: string) => target === base || target.startsWith(base + path.sep);
+  if (!inside(root, resolved)) return null;
+  // Reject every symlink below the trusted root, including dangling links.
+  // realpath alone is insufficient: a dangling link can still redirect writeFile.
+  try {
+    await fsPromises.realpath(root);
+    let current = root;
+    for (const segment of path.relative(root, resolved).split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      try {
+        if ((await fsPromises.lstat(current)).isSymbolicLink()) return null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+      }
+    }
+    return resolved;
+  } catch { return null; }
 }
 
 // ============================
@@ -139,7 +154,7 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger) {
         required: ["path"],
       }),
       execute: (async (args: { path: string }) => {
-        const resolved = resolveSandboxedPath(workspaceDir, args.path);
+        const resolved = await resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
           const content = await fsPromises.readFile(resolved, "utf-8");
@@ -164,7 +179,7 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger) {
         required: ["path", "content"],
       }),
       execute: (async (args: { path: string; content: string }) => {
-        const resolved = resolveSandboxedPath(workspaceDir, args.path);
+        const resolved = await resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
           await fsPromises.mkdir(path.dirname(resolved), { recursive: true });
@@ -201,7 +216,7 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger) {
         required: ["path", "edits"],
       }),
       execute: (async (args: { path: string; edits: Array<{ oldText: string; newText: string }> }) => {
-        const resolved = resolveSandboxedPath(workspaceDir, args.path);
+        const resolved = await resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         if (!args.edits || args.edits.length === 0) return JSON.stringify({ error: "edits array cannot be empty." });
         try {
@@ -298,15 +313,6 @@ export class StandaloneLLMRunner implements LLMRunner {
       `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms`,
     );
 
-    // Create OpenAI-compatible provider via AI SDK
-    // Use "compatible" mode to call /chat/completions (not Responses API),
-    // which works with all OpenAI-compatible backends (DeepSeek, Qwen, etc.)
-    const provider = createOpenAI({
-      baseURL: this.config.baseUrl,
-      apiKey: this.config.apiKey,
-      compatibility: "compatible",
-    });
-
     // Select tools based on mode + storage
     // Service mode (COS): use storage-backed tools → LLM reads/writes via StorageAdapter
     // Standalone mode (local FS): use sandboxed FS tools → LLM reads/writes local files
@@ -326,6 +332,25 @@ export class StandaloneLLMRunner implements LLMRunner {
     } else {
       tools = undefined; // pure-text task — never expose any tool to the model
     }
+
+    if (this.config.provider === "oauth") {
+      this.lastUsage = undefined;
+      const { createOAuthRuntime, parseOAuthConfig } = await import("../../auth/oauth/runtime.js");
+      const { runOAuth } = await import("../../auth/oauth/runner.js");
+      const runtime = createOAuthRuntime(this.config.oauth ?? parseOAuthConfig());
+      const result = await runOAuth(params, { ...runtime, model: this.model, tools, timeoutMs });
+      this.lastUsage = result.usage;
+      return result.text;
+    }
+
+    // Create OpenAI-compatible provider via AI SDK
+    // Use "compatible" mode to call /chat/completions (not Responses API),
+    // which works with all OpenAI-compatible backends (DeepSeek, Qwen, etc.)
+    const provider = createOpenAI({
+      baseURL: this.config.baseUrl,
+      apiKey: this.config.apiKey,
+      compatibility: "compatible",
+    });
 
     try {
       // H-11 Step 2: combine internal timeout with caller-provided abortSignal

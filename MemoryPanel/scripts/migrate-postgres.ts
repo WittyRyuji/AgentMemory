@@ -1,3 +1,4 @@
+import { loadDatabaseConfig } from '../src/db-config.js';
 import { Pool } from 'pg';
 import { readPanelSnapshot, importPanelSnapshot } from '../src/panel/state/import-postgres.js';
 
@@ -16,7 +17,7 @@ async function main(): Promise<void> {
   const snapshot = readPanelSnapshot(value('--identities'), value('--templates'));
   console.log(JSON.stringify({ mode: args.includes('--apply') ? 'apply' : 'dry-run', identities: snapshot.identities.length, templates: snapshot.templates.length }));
   if (!args.includes('--apply')) return;
-  const connectionString = process.env.PANEL_POSTGRES_URL || process.env.DATABASE_URL;
+  const connectionString = loadDatabaseConfig('panel').url;
   if (!connectionString) throw new Error('PANEL_POSTGRES_URL or DATABASE_URL is required');
   const pool = new Pool({ connectionString, connectionTimeoutMillis: 10_000 });
   try {

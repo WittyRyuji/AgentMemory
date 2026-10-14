@@ -13,8 +13,6 @@ data:
   fileStoreOthers: postgres
 memory:
   storeBackend: postgres
-  postgres:
-    url: "${TDAI_POSTGRES_URL}"
   capture:
     enabled: true
   recall:
@@ -44,9 +42,6 @@ skill:
     enabled: false
   worker:
     concurrency: 2
-metadata:
-  store:
-    postgresUrl: "${TDAI_POSTGRES_URL}"
-# OpenAI OAuth is deferred. No paid-key LLM fallback is configured here.
+# Independent OpenAI OAuth is opt-in; follow ../OAUTH.md. No paid-key LLM fallback is configured here.
 # To retain an existing explicitly configured LLM, copy your llm block and enable
 # memory.extraction / skill.extraction deliberately. Embedding and LLM keys differ.

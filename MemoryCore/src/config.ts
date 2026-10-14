@@ -1,3 +1,5 @@
+import { parseOAuthConfig, type OAuthConfig } from "./auth/oauth/runtime.js";
+import { loadDatabaseConfig, databaseBackend } from "./db-config.js";
 /**
  * Plugin configuration types and parser (v3).
  *
@@ -246,7 +248,8 @@ export interface StandaloneLLMOverrideConfig {
    * gateway 层负责在构造 runner 前把 baseUrl / apiKey 换成解析后的最终值，
    * 因此 runner 无需感知 provider 字段。
    */
-  provider?: "openai" | "proxy";
+  provider?: "openai" | "proxy" | "oauth";
+  oauth?: OAuthConfig;
   /** provider=proxy 时的可选配置。 */
   proxy?: {
     /** 是否用 memory systemUser.userKey 作为 Authorization（默认 true）。 */
@@ -580,7 +583,9 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
   const bm25Group = obj(c, "bm25");
 
   // --- Store backend ---
-  const storeBackendRaw = process.env.STORE_MODE ?? str(c, "storeBackend") ?? "sqlite";
+  const database = loadDatabaseConfig("core");
+  if (database.fromFile && !database.envOverride && str(obj(c, "postgres"), "url") && str(obj(c, "postgres"), "url") !== database.url) throw new Error("Database URL conflicts with config/db.toml");
+  const storeBackendRaw = databaseBackend(database, process.env.STORE_MODE ?? str(c, "storeBackend"), "sqlite");
   if (!["sqlite", "tcvdb", "mongodb", "postgres"].includes(storeBackendRaw)) throw new Error("Unsupported memory store backend");
   const storeBackend: StoreBackend =
     storeBackendRaw === "tcvdb" ? "tcvdb"
@@ -716,7 +721,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       configError: embeddingConfigError,
     },
     storeBackend,
-    postgres: { url: process.env.TDAI_POSTGRES_URL ?? str(obj(c, "postgres"), "url") ?? "", instanceId: process.env.TDAI_INSTANCE_ID ?? str(obj(c, "postgres"), "instanceId") ?? "default" },
+    postgres: { url: database.url ?? str(obj(c, "postgres"), "url") ?? "", instanceId: process.env.TDAI_INSTANCE_ID ?? str(obj(c, "postgres"), "instanceId") ?? "default" },
     tcvdb: {
       url: str(tcvdbGroup, "url") ?? "",
       username: str(tcvdbGroup, "username") ?? "root",
@@ -740,8 +745,9 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
     llm: (() => {
       const llmGroup = obj(c, "llm");
       const rawProvider = str(llmGroup, "provider");
-      const provider: "openai" | "proxy" =
-        rawProvider === "proxy" ? "proxy" : "openai";
+      const provider: "openai" | "proxy" | "oauth" =
+        rawProvider === "oauth" ? "oauth" : rawProvider === "proxy" ? "proxy" : "openai";
+      if (rawProvider && !["oauth", "openai", "proxy"].includes(rawProvider)) throw new Error("Unknown LLM provider");
       const proxyGroup = obj(llmGroup, "proxy");
       return {
         enabled: bool(llmGroup, "enabled") ?? false,
@@ -751,6 +757,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
         maxTokens: num(llmGroup, "maxTokens") ?? 4096,
         timeoutMs: num(llmGroup, "timeoutMs") ?? 120_000,
         provider,
+        oauth: provider === "oauth" ? parseOAuthConfig(obj(llmGroup, "oauth")) : undefined,
         stream: bool(llmGroup, "stream") ?? false,
         proxy: {
           // 默认 true：走 proxy 时用 memory 系统用户 key 作为 Authorization。

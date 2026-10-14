@@ -31,7 +31,8 @@
     "ioredis": "^5.11.1",
     "js-yaml": "^4.1.0",
     "node-pty": "^1.1.0",
-    "pg": "^8.16.0"
+    "pg": "^8.16.0",
+    "smol-toml": "1.9.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

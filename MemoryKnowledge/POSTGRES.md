@@ -1,5 +1,8 @@
 # MemoryKnowledge: PostgreSQL storage
 
+Database settings are centralized in [`../config/db.toml`](../config/README.md). Copy the root example and follow its precedence/mount rules. The environment variables below remain supported for older deployments when that file is absent.
+
+
 ## Runtime
 
 Set `KNOWLEDGE_POSTGRES_URL` to a PostgreSQL connection URL, then run `npm install`, `npm run build`, and `npm run dev` (or the existing Docker command). `DATABASE_URL` is a fallback. `KNOWLEDGE_DB_PATH` is no longer a runtime setting. `npm run db:migrate` explicitly creates all runtime tables; startup does the same automatically. The startup migration is transactional/idempotent and does not drop existing tables. Tables live in the connection's default schema; use a dedicated database or a dedicated role/search_path. Five pooled connections plus an in-process build queue support modest machines; no GPU or local embedding model is added. Wiki ingest still uses the existing external LLM configuration.

@@ -1,5 +1,8 @@
 # Panel PostgreSQL state
 
+Database settings are centralized in [`../config/db.toml`](../config/README.md). Copy the root example and follow its precedence/mount rules. The environment variables below remain supported for older deployments when that file is absent.
+
+
 Existing file mode remains the default. To use PostgreSQL:
 
 ```sh

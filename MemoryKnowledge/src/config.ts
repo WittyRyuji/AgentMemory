@@ -1,3 +1,4 @@
+import { loadDatabaseConfig } from "./db-config.js";
 /**
  * Service configuration — environment variables + config loading.
  *
@@ -175,7 +176,7 @@ export function loadConfig(): ServiceConfig {
     dataDir,
     // 未显式配置 → 落在数据卷内，随 /data/knowledge 一起持久化。
     sshKeyDir: expandHome(env("KNOWLEDGE_SSH_KEY_DIR", join(dataDir, "ssh-keys"))),
-    postgresUrl: env("KNOWLEDGE_POSTGRES_URL", env("DATABASE_URL", "")),
+    postgresUrl: loadDatabaseConfig("knowledge").url ?? "",
     logLevel: env("LOG_LEVEL", "debug"),
     apiPrefix: env("API_PREFIX", "/v3"),
     publicBaseUrl: env("KNOWLEDGE_PUBLIC_BASE_URL", ""),

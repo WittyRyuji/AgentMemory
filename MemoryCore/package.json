@@ -49,7 +49,10 @@
     "postinstall": "bash scripts/openclaw-after-tool-call-messages.patch.sh 2>/dev/null || true",
     "test:postgres": "vitest run src/core/store/postgres src/metadata/store/postgres-adapter.test.ts",
     "migrate:postgres": "node --import tsx scripts/migrate-sqlite-to-postgres/cli.ts",
-    "typecheck:postgres": "tsc -p tsconfig.postgres.json"
+    "typecheck:postgres": "tsc -p tsconfig.postgres.json",
+    "oauth": "node --import tsx scripts/oauth/cli.ts",
+    "test:oauth": "vitest run src/auth/oauth",
+    "typecheck:oauth": "tsc -p tsconfig.oauth.json"
   },
   "files": [
     "dist/",
@@ -81,7 +84,8 @@
     "!src/**/*.spec.ts",
     "!src/**/__tests__/",
     "!hermes-plugin/**/__pycache__/**",
-    "!hermes-plugin/**/*.pyc"
+    "!hermes-plugin/**/*.pyc",
+    "scripts/oauth/"
   ],
   "keywords": [
     "openclaw",
@@ -130,7 +134,10 @@
     "undici": "^8.1.0",
     "yaml": "^2.8.3",
     "zod": "^4.4.3",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "smol-toml": "1.9.1",
+    "jose": "6.2.10",
+    "ajv": "^8.17.1"
   },
   "optionalDependencies": {
     "@clickhouse/client": "^1.18.5",

@@ -1,3 +1,4 @@
+import { loadDatabaseConfig, databaseBackend } from './db-config.js';
 /** Config loading: YAML file → merge with CLI overrides → ProxyConfig. */
 
 import { readFileSync } from "node:fs";
@@ -334,9 +335,11 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
   const configPath = overrides.configFile || "config.yaml";
   const yaml = loadYamlConfig(configPath);
   const defaultWecomIdentity = DEFAULT_CONFIG.wecomIdentity!;
-  const storageBackend = process.env.PROXY_STORAGE_BACKEND?.trim() || yaml.storage?.backend || DEFAULT_CONFIG.storage.backend;
+  const database = loadDatabaseConfig('proxy');
+  const storageBackend = databaseBackend(database, process.env.PROXY_STORAGE_BACKEND?.trim() || yaml.storage?.backend, DEFAULT_CONFIG.storage.backend);
   if (!['postgres', 'cos', 'sqlite', 'fs', 'memory'].includes(storageBackend)) throw new Error('invalid PROXY_STORAGE_BACKEND');
-  const postgresUrl = process.env.PROXY_POSTGRES_URL?.trim() || process.env.DATABASE_URL?.trim() || yaml.storage?.postgres?.url || '';
+  if (database.fromFile && !database.envOverride && yaml.storage?.postgres?.url && yaml.storage.postgres.url !== database.url) throw new Error('Database URL conflicts with config/db.toml');
+  const postgresUrl = database.url || yaml.storage?.postgres?.url || '';
   if (storageBackend === 'postgres' && !postgresUrl) throw new Error('PROXY_POSTGRES_URL or DATABASE_URL is required');
 
   const selection = buildSelectionConfig(yaml.selection, configPath);

@@ -1,3 +1,5 @@
+import { parseOAuthConfig } from "../auth/oauth/runtime.js";
+import { loadDatabaseConfig } from "../db-config.js";
 /**
  * TDAI Gateway — Configuration management.
  *
@@ -587,6 +589,7 @@ export type GatewayConfigOverrides = Omit<Partial<GatewayConfig>, "server" | "da
  * 4. Pure environment-variable config (no file)
  */
 export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayConfig {
+  const database = loadDatabaseConfig("core");
   let fileConfig: Record<string, unknown> = {};
 
   // Try to load config file
@@ -640,8 +643,9 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
   const llmConfig = obj(fileConfig, "llm");
   const llmProxyConfig = obj(llmConfig, "proxy");
   const rawLlmProvider = env("TDAI_LLM_PROVIDER") ?? str(llmConfig, "provider");
-  const llmProvider: "openai" | "proxy" =
-    rawLlmProvider === "proxy" ? "proxy" : "openai";
+  const llmProvider: "openai" | "proxy" | "oauth" =
+    rawLlmProvider === "oauth" ? "oauth" : rawLlmProvider === "proxy" ? "proxy" : "openai";
+  if (rawLlmProvider && !["oauth", "openai", "proxy"].includes(rawLlmProvider)) throw new Error("Unknown LLM provider");
   const llm: StandaloneLLMConfig = {
     baseUrl: env("TDAI_LLM_BASE_URL") ?? str(llmConfig, "baseUrl") ?? "https://api.openai.com/v1",
     apiKey: env("TDAI_LLM_API_KEY") ?? str(llmConfig, "apiKey") ?? "",
@@ -649,6 +653,7 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     maxTokens: envInt("TDAI_LLM_MAX_TOKENS") ?? num(llmConfig, "maxTokens") ?? 4096,
     timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? num(llmConfig, "timeoutMs") ?? 120_000,
     provider: llmProvider,
+    oauth: llmProvider === "oauth" ? parseOAuthConfig(obj(llmConfig, "oauth")) : undefined,
     proxy: {
       useMemorySystemUserKey: bool(llmProxyConfig, "useMemorySystemUserKey") ?? true,
     },
@@ -681,7 +686,7 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
   // provider=proxy 模式下即使 apiKey 为空也要 splice —— 因为最终 apiKey 由
   // memory systemUser.userKey 提供，llm.apiKey 只是 provider=openai 时的显式配置。
   const shouldSpliceLlm =
-    !memory.llm.enabled && llm.baseUrl && (llm.apiKey || llm.provider === "proxy");
+    !memory.llm.enabled && llm.baseUrl && (llm.apiKey || llm.provider === "proxy" || llm.provider === "oauth");
   if (shouldSpliceLlm) {
     memory.llm = {
       enabled: true,
@@ -691,6 +696,7 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
       maxTokens: llm.maxTokens ?? 4096,
       timeoutMs: llm.timeoutMs ?? 120_000,
       provider: llm.provider,
+      oauth: llm.oauth,
       proxy: {
         useMemorySystemUserKey: llm.proxy?.useMemorySystemUserKey ?? true,
       },
@@ -753,11 +759,11 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
   // (§5.3.1 rule 2); the rowfs × store-mode combination check happens at
   // assembly time (D8③), not here.
   const fileStore = resolveFileStoreMode(
-    env("FILE_STORE_MODE") ?? str(dataConfig, "fileStore"),
+    env("FILE_STORE_MODE") ?? str(dataConfig, "fileStore") ?? (database.fromFile ? "rowfs" : undefined),
     deployMode,
   );
   const fileStoreOthers = resolveFileStoreOthersMode(
-    env("FILE_STORE_OTHERS") ?? str(dataConfig, "fileStoreOthers"),
+    env("FILE_STORE_OTHERS") ?? str(dataConfig, "fileStoreOthers") ?? (database.fromFile ? "postgres" : undefined),
     deployMode,
   );
 
@@ -904,16 +910,17 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
   // Offload executor config (yaml: offload)
   const metadataConfig = obj(fileConfig, "metadata");
   const storeYaml = obj(metadataConfig, "store");
+  if (database.fromFile && !database.envOverride && str(storeYaml, "postgresUrl") && str(storeYaml, "postgresUrl") !== database.metadataUrl) throw new Error("Metadata URL conflicts with config/db.toml");
   const systemUserYaml = obj(metadataConfig, "systemUser");
   const memorySystemUserYaml = obj(systemUserYaml, "memory");
   const metadataStore: GatewayMetadataStoreConfig | undefined =
-    str(storeYaml, "sqliteBaseDir") || str(storeYaml, "mongoUri") || str(storeYaml, "postgresUrl") ||
+    database.metadataUrl || str(storeYaml, "sqliteBaseDir") || str(storeYaml, "mongoUri") || str(storeYaml, "postgresUrl") ||
     str(storeYaml, "mongoDbPrefix") ||
     bool(storeYaml, "mongoTransactions") !== undefined || num(storeYaml, "storeCacheMaxInstances") !== undefined
       ? {
           sqliteBaseDir: str(storeYaml, "sqliteBaseDir"),
           mongoUri: str(storeYaml, "mongoUri"),
-          postgresUrl: str(storeYaml, "postgresUrl"),
+          postgresUrl: database.metadataUrl ?? str(storeYaml, "postgresUrl"),
           mongoTransactions: bool(storeYaml, "mongoTransactions") ?? true,
           storeCacheMaxInstances: num(storeYaml, "storeCacheMaxInstances"),
           mongoDbPrefix: str(storeYaml, "mongoDbPrefix"),

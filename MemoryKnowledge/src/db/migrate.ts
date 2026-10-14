@@ -1,10 +1,11 @@
+import { loadDatabaseConfig } from "../db-config.js";
 import "dotenv/config";
 import { createDb } from "./client.js";
 
 try {
   const { raw } = await createDb({
     connectionString:
-      process.env.KNOWLEDGE_POSTGRES_URL ?? process.env.DATABASE_URL ?? "",
+      loadDatabaseConfig("knowledge").url ?? "",
   });
   await raw.end();
   console.log("Knowledge PostgreSQL schema ready");

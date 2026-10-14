@@ -12,7 +12,7 @@ export interface PgConnection {
     sql: string,
     values?: unknown[],
   ): Promise<PgResult<T>>;
-  release(): void;
+  release(destroy?: boolean): void;
 }
 export interface PgPool {
   connect(): Promise<PgConnection>;
@@ -20,7 +20,7 @@ export interface PgPool {
 }
 export function instanceSchema(
   instanceId: string,
-  purpose: "memory" | "metadata" = "memory",
+  purpose: "memory" | "metadata" | "oauth" = "memory",
 ): string {
   if (!instanceId.trim())
     throw new Error("PostgreSQL requires a nonempty instance ID");
@@ -45,13 +45,13 @@ export class PostgresDatabase {
     readonly schema: string,
     private readonly ownsPool = false,
   ) {
-    if (!/^am_(memory|metadata)_[a-f0-9]{32}$/.test(schema))
+    if (!/^am_(memory|metadata|oauth)_[a-f0-9]{32}$/.test(schema))
       throw new Error("Invalid PostgreSQL schema");
   }
   static connect(
     url: string,
     instanceId: string,
-    purpose: "memory" | "metadata" = "memory",
+    purpose: "memory" | "metadata" | "oauth" = "memory",
   ) {
     if (!/^postgres(?:ql)?:\/\//.test(url))
       throw new Error("A PostgreSQL connection URL is required");

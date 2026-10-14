@@ -1,3 +1,4 @@
+import { loadDatabaseConfig } from "../../src/db-config.js";
 import { parseArgs } from "node:util";
 import { PostgresDatabase } from "../../src/core/store/postgres/client.js";
 import { migrateSqliteToPostgres } from "./migrate.js";
@@ -20,7 +21,7 @@ let target: PostgresDatabase | undefined;
 try {
   if (values.apply)
     target = PostgresDatabase.connect(
-      process.env.TDAI_POSTGRES_URL ?? "",
+      loadDatabaseConfig("core").url ?? "",
       values.instance ?? "",
     );
   const report = await migrateSqliteToPostgres(

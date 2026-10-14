@@ -1,0 +1,3 @@
+
+# Never bake private database configuration into an image
+config/db.toml

@@ -47,3 +47,6 @@ e2e/
 # 容器相关自身
 Dockerfile
 .dockerignore
+
+# Never bake private database configuration into an image
+config/db.toml

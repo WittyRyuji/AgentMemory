@@ -142,3 +142,7 @@ z_config/
 
 # Also ignore dependency directory symlinks used by development workspaces.
 node_modules
+
+# Private database configuration
+config/db.toml
+**/config/db.toml

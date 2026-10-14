@@ -2,7 +2,7 @@ name: PostgreSQL migration
 on:
   workflow_dispatch:
   push:
-    branches: [feat/postgres-migration]
+    branches: [feat/postgres-migration, feat/independent-oauth]
   pull_request:
 permissions:
   contents: read
@@ -31,6 +31,8 @@ jobs:
       PG_TEST_URL: postgresql://postgres:test-only@127.0.0.1:5432/agentmemory_test
     steps:
       - uses: actions/checkout@v4
+      - name: Verify shared database loader copies
+        run: node scripts/sync-db-config.mjs --check
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -46,6 +48,9 @@ jobs:
         run: |
           npm run typecheck:postgres
           npm run test:postgres
+          npm run typecheck:oauth
+          npm run test:oauth
+          npx vitest run src/db-config.test.ts
           npm run build:plugin
       - name: Install Knowledge dependencies and native derived graph index
         if: matrix.module == 'MemoryKnowledge'

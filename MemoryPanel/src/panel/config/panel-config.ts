@@ -1,3 +1,4 @@
+import { loadDatabaseConfig, databaseBackend } from '../../db-config.js';
 import { config as loadDotenv } from 'dotenv';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -234,9 +235,10 @@ function buildAuthConfig(): PanelAuthConfig {
 }
 
 export function loadPanelConfig(): PanelConfig {
-  const stateBackend = env('PANEL_STATE_BACKEND', 'file');
+  const database = loadDatabaseConfig('panel');
+  const stateBackend = databaseBackend(database, process.env.PANEL_STATE_BACKEND, 'file');
   if (stateBackend !== 'file' && stateBackend !== 'postgres') throw new Error('invalid PANEL_STATE_BACKEND');
-  const postgresUrl = env('PANEL_POSTGRES_URL', env('DATABASE_URL', ''));
+  const postgresUrl = database.url ?? '';
   if (stateBackend === 'postgres' && !postgresUrl) throw new Error('PANEL_POSTGRES_URL or DATABASE_URL is required');
   const level = env('LOG_LEVEL', 'info') as LogLevel;
   const format = env('LOG_FORMAT', 'json') as 'json' | 'pretty';

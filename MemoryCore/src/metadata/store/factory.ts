@@ -1,3 +1,4 @@
+import { loadDatabaseConfig } from "../../db-config.js";
 /**
  * 元数据存储工厂 + 配置解析 + MetadataStorePool（v3.0 按实例分库）。
  */
@@ -76,6 +77,8 @@ export function loadStoreConfig(
   env: NodeJS.ProcessEnv = process.env,
   fallbackSqliteBaseDir?: string,
 ): MetadataStoreConfig {
+  const database = loadDatabaseConfig("core", env);
+  if (database.metadataUrl || database.fromFile) env = { ...env, TDAI_METADATA_POSTGRES_URL: database.metadataUrl ?? database.url };
   assertMetadataStoreConfigExclusive(env);
 
   const mongoUri = env.TDAI_METADATA_MONGO_URI?.trim();

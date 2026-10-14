@@ -1,3 +1,4 @@
+import { loadDatabaseConfig } from "../db-config.js";
 /** Offline, all-or-nothing import from the legacy SQLite + file tree. */
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readdirSync } from "node:fs";
@@ -171,7 +172,7 @@ async function main(): Promise<void> {
     );
   const { raw } = await createDb({
     connectionString:
-      process.env.KNOWLEDGE_POSTGRES_URL ?? process.env.DATABASE_URL ?? "",
+      loadDatabaseConfig("knowledge").url ?? "",
   });
   let release: (() => Promise<void>) | undefined;
   try {

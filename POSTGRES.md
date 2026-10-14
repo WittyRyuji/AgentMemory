@@ -22,22 +22,30 @@ Panel retains its signing/encryption secret and instance registry as configurati
 
 ## Runtime configuration
 
-Use `MemoryCore/tdai-gateway.postgres.yaml` with:
+Database settings now live in root **`config/db.toml`**, shared by Core, Knowledge,
+Panel and Proxy. Copy `config/db.example.toml` to that path, replace the example
+URL, and protect the file with `chmod 600`. Per-module URL overrides and separate
+Core metadata URL are supported. See [configuration rules](config/README.md) for
+exact path resolution, compatibility, conflict handling and container mounts.
+The private file is gitignored; no actual credentials are included in this branch.
 
-- `STORE_MODE=postgres`
-- `TDAI_POSTGRES_URL=postgresql://…`
-- `STATE_BACKEND=postgres`
-- `FILE_STORE_MODE=rowfs`
-- `FILE_STORE_OTHERS=postgres`
-- Explicit external embedding URL, API key, model and correct output dimensions
+Use `MemoryCore/tdai-gateway.postgres.yaml` for the existing gateway settings.
+Configure the external embedding URL, API key, model and real dimensions there
+or through the shown environment variables. The TOML URL selects PostgreSQL and
+sets PG-compatible default storage modes. Old module-specific URL variables and
+`DATABASE_URL` remain supported when the default file is absent. With a file,
+conflicting legacy values fail instead of silently selecting another database.
 
-Enable the other modules explicitly with `KNOWLEDGE_POSTGRES_URL`, `PANEL_STATE_BACKEND=postgres` plus `PANEL_POSTGRES_URL`, and `PROXY_STORAGE_BACKEND=postgres` plus `PROXY_POSTGRES_URL`. Each accepts `DATABASE_URL` as a fallback. Their public-schema tables do not conflict with Core schemas. The local compose example covers Core/Knowledge; keep existing Panel/Proxy deployment configuration and add these switches.
+`docker-compose.postgres.yaml` is a local validation example, not an already
+ deployed service. It mounts `config/db.toml` read-only in Core/Knowledge and
+runs PostgreSQL 17 with pgvector. Use hostname `postgres` in its shared URL.
+Core/Knowledge ports bind to loopback. Keep Panel/Proxy's existing deployment
+configuration and mount the same file as described in the configuration guide.
+Do not expose PostgreSQL. Use authenticated TLS termination for the gateway and
+certificate-verified TLS for a remote database. Provision `vector` in `public`
+when the application role cannot create extensions. Back up the full database.
 
-Metadata defaults to the same PG URL. Remove old explicit SQLite/Mongo metadata settings; conflicting backends fail startup. PG startup errors fail loudly instead of creating SQLite or switching to local model inference. Embedding configuration changes also fail startup until an explicit re-embedding migration is performed.
-
-`docker-compose.postgres.yaml` is a local validation example, not an already-deployed service. It runs PostgreSQL 17 with pgvector and binds Core/Knowledge ports to loopback. Set passwords and keys outside Git. Percent-encode a password when constructing a URL. Do not expose the database; use authenticated TLS termination before exposing the gateway. For an external database, require certificate-verified TLS using the node-postgres connection configuration, and provision `vector` in `public` before starting if the application role cannot create extensions. The application role needs schema/table creation privileges for the selected database. Back up the full database (including all `am_*` schemas and Knowledge tables).
-
-The YAML deliberately leaves memory/skill LLM extraction disabled until a provider is explicitly configured. Existing extraction code is retained; no independent OpenAI OAuth is implemented in this phase and no paid LLM fallback is introduced. Embedding API access is separate and required. The normal clients continue using the existing gateway endpoints, authentication and tenant identifiers. For PG-backed shared memory use the gateway; legacy in-process plugin storage modes retain their old behavior.
+The YAML deliberately leaves memory/skill LLM extraction disabled until a provider is explicitly configured. Existing extraction code is retained. Independent OpenAI OAuth is now available as an explicit opt-in; see [OAuth setup and verification](OAUTH.md). No paid LLM fallback is introduced. Embedding API access is separate and required. The normal clients continue using the existing gateway endpoints, authentication and tenant identifiers. For PG-backed shared memory use the gateway; legacy in-process plugin storage modes retain their old behavior.
 
 The example uses low worker concurrency. Start with a small workload: vector search currently uses exact pgvector cosine distance (no approximate ANN index), and file listings may materialize matching keys for pagination. Native PG full-text ranking replaces SQLite FTS5's score; ordering/scores are not mathematically identical. Chinese tokenization remains available without a GPU. Load/quality benchmarking and ANN tuning are still required before a large production corpus.
 
@@ -57,7 +65,7 @@ npm run migrate:postgres -- \
 
 This defaults to a source-only dry run: it does not connect to or change PG. Review the counts and skipped file/table list. The root must be the actual per-instance storage directory, not a general home/config directory. Symlinks are refused. Unscoped historical persona/scene files require explicit ownership; scoped `profiles/...` files retain their recorded owners. The utility copies credentials already stored in metadata into the target database, so both backups and target must be protected accordingly.
 
-After inspection, set `TDAI_POSTGRES_URL` securely and rerun with `--apply`. The target must have no business rows in either instance schema. Schema setup is idempotent; all imported metadata, rows, vectors, profiles and object bytes are committed together or rolled back. Source files are read-only. Reapplying to an occupied target fails rather than overwriting. Identity sequences are reset after copying IDs.
+After inspection, configure `config/db.toml` securely and rerun with `--apply`. The target must have no business rows in either instance schema. Schema setup is idempotent; all imported metadata, rows, vectors, profiles and object bytes are committed together or rolled back. Source files are read-only. Reapplying to an occupied target fails rather than overwriting. Identity sequences are reset after copying IDs.
 
 When provider/model/dimensions match, sqlite-vec embeddings are copied without an API call. Missing or zero placeholder vectors are counted. To intentionally discard old vectors, pass `--without-vectors`; text/profile data remain available, but semantic recall is incomplete until explicit external re-embedding. The utility never calls an embedding/LLM API. Skill history is retained; only the source's head-vector index can be copied when the old engine had no historical embeddings. FTS indexes are regenerated locally from imported text.
 

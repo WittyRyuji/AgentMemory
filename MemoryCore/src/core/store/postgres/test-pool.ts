@@ -29,12 +29,12 @@ export class TestPostgresPool implements PgPool {
         ): Promise<PgResult<T>> => {
           const result = await client.query(sql, values);
           const schema = sql.match(
-            /^CREATE SCHEMA IF NOT EXISTS "(am_(?:memory|metadata)_[a-f0-9]{32})"$/,
+            /^CREATE SCHEMA IF NOT EXISTS "(am_(?:memory|metadata|oauth)_[a-f0-9]{32})"$/,
           )?.[1];
           if (schema) this.schemas.add(schema);
           return result as unknown as PgResult<T>;
         },
-        release: () => client.release(),
+        release: (destroy) => client.release(destroy),
       };
     }
     const previous = this.previous;

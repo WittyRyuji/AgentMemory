@@ -1,3 +1,4 @@
+import { loadDatabaseConfig } from '../src/db-config.js';
 import { Pool } from 'pg';
 import { readProxySnapshot, readRateLimitSnapshot, importProxySnapshot } from '../src/storage/import-postgres.js';
 
@@ -18,7 +19,7 @@ async function main(): Promise<void> {
   if (new Set(rows.map(r => r.key)).size !== rows.length) throw new Error('duplicate source keys; reconcile sources before importing');
   console.log(JSON.stringify({ mode: args.includes('--apply') ? 'apply' : 'dry-run', rows: rows.length }));
   if (!args.includes('--apply')) return;
-  const connectionString = process.env.PROXY_POSTGRES_URL || process.env.DATABASE_URL;
+  const connectionString = loadDatabaseConfig('proxy').url;
   if (!connectionString) throw new Error('PROXY_POSTGRES_URL or DATABASE_URL is required');
   const pool = new Pool({ connectionString, connectionTimeoutMillis: 10_000 });
   try {

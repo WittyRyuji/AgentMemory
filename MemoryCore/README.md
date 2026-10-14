@@ -270,3 +270,12 @@ npm run seed-v2
 ## License
 
 MIT
+
+## Independent OAuth and shared PostgreSQL configuration
+
+See [OAuth setup](../OAUTH.md) for the owner-authorized OpenAI sign-in, separate
+auth/inference adapters, PG-encrypted sessions and L1/L2/L3 tool support. Database
+URLs are read from repository-root `config/db.toml`; start with
+[`config/db.example.toml`](../config/db.example.toml) and the
+[configuration guide](../config/README.md). Existing Tencent/API-key paths remain
+available by explicit provider selection. Embeddings use a separate external API.

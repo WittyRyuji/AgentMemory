@@ -79,7 +79,7 @@ async function createSeedPipeline(opts: SeedRuntimeOptions): Promise<{ pipeline:
   let l1LlmRunner: LLMRunner | undefined;
   let l2l3LlmRunner: LLMRunner | undefined;
 
-  if (cfg.llm.enabled && cfg.llm.apiKey) {
+  if (cfg.llm.enabled && (cfg.llm.apiKey || cfg.llm.provider === "oauth")) {
     const runnerFactory = new StandaloneLLMRunnerFactory({
       config: {
         baseUrl: cfg.llm.baseUrl,
@@ -88,6 +88,8 @@ async function createSeedPipeline(opts: SeedRuntimeOptions): Promise<{ pipeline:
         maxTokens: cfg.llm.maxTokens,
         timeoutMs: cfg.llm.timeoutMs,
         stream: cfg.llm.stream ?? false,
+        provider: cfg.llm.provider,
+        oauth: cfg.llm.oauth,
       },
       logger,
     });
