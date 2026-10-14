@@ -44,9 +44,9 @@ After import, enable PG, verify real client sessions and admin limits, and retai
 
 ```sh
 npm run typecheck
-npm test -- --maxWorkers=1
+npm test
 # Native PG (isolated disposable *_test database only):
-PG_TEST_URL=postgresql://user:password@localhost:5432/agentmemory_test npm test -- --maxWorkers=1
+PG_TEST_URL=postgresql://user:password@localhost:5432/agentmemory_test npm test
 ```
 
 Default tests use PGlite, not a network PostgreSQL server. Native runs create/drop an isolated random schema. Coverage includes cross-store persistence, literal-prefix isolation, CAS, TTL, binding timestamps, session state, version pins, strict errors, rate limits/counters, turn lanes, atomic import rollback, source integrity, and native SQLite source reading in an isolated process. This does not substitute for a live multi-node server/load test or private-extension integration tests.

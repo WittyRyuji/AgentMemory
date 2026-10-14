@@ -66,7 +66,7 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run typecheck
-          npm test -- --maxWorkers=1
+          npm test
       - name: Proxy PostgreSQL state, limits, turns and import
         if: matrix.module == 'MemoryProxy'
         working-directory: MemoryProxy
@@ -74,4 +74,4 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm rebuild better-sqlite3
           npm run typecheck
-          npm test -- --maxWorkers=1
+          npm test

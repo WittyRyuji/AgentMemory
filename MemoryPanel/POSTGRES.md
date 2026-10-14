@@ -28,9 +28,9 @@ Either source may be omitted when it does not exist. An explicitly supplied miss
 
 ```sh
 npm run typecheck
-npm test -- --maxWorkers=1
+npm test
 # Optional real-server run against an isolated disposable database:
-PG_TEST_URL=postgresql://user:password@localhost:5432/agentmemory_test npm test -- --maxWorkers=1
+PG_TEST_URL=postgresql://user:password@localhost:5432/agentmemory_test npm test
 ```
 
 Without `PG_TEST_URL`, tests use PGlite (the PostgreSQL engine in WASM), not a network PostgreSQL server. Native runs create and drop a random test schema and reject database names without `_test`. Tests cover encrypted identity round trips, instance/provider isolation, template overwrite, local-file compatibility, fail-closed storage errors, source integrity, atomic import/rollback and empty-target protection. They do not exercise a live external IdP.
