@@ -31,6 +31,22 @@ jobs:
       PG_TEST_URL: postgresql://postgres:test-only@127.0.0.1:5432/agentmemory_test
     steps:
       - uses: actions/checkout@v4
+      - name: Validate split Compose files without deploying
+        if: matrix.module == 'MemoryProxy'
+        env:
+          POSTGRES_PASSWORD: compose-validation-only
+          POSTGRES_VOLUME: compose-validation-only
+          TDAI_GATEWAY_API_KEY: compose-validation-only
+          TDAI_PROXY_ADMIN_API_KEY: compose-validation-only
+          MEMORY_EMBEDDING_BASE_URL: https://example.invalid/v1
+          MEMORY_EMBEDDING_API_KEY: compose-validation-only
+          MEMORY_EMBEDDING_MODEL: fixture
+          KNOWLEDGE_SERVICE_KEY: compose-validation-only
+        run: |
+          for component in postgres core panel proxy knowledge; do
+            docker compose --env-file /dev/null -f "docker-compose.$component.yaml" config --quiet
+          done
+          bash scripts/check-knowledge-entrypoint.sh
       - name: Verify shared database loader copies
         run: node scripts/sync-db-config.mjs --check
       - uses: actions/setup-node@v4
@@ -80,3 +96,6 @@ jobs:
           npm rebuild better-sqlite3
           npm run typecheck
           npm test
+      - name: Check single-container deployment invariants
+        if: matrix.module == 'MemoryProxy'
+        run: node scripts/check-compose.mjs

@@ -1,0 +1,66 @@
+# LEGACY combined layout, only for stopping an existing deployment.
+# Use the original project name with -p. See INSTALL_CN.md before migration.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: agentmemory
+      POSTGRES_USER: agentmemory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a PostgreSQL password outside Git}
+    volumes:
+      - agentmemory-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U agentmemory -d agentmemory"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  core:
+    build: ../../MemoryCore
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8420:8420"
+    environment:
+      STORE_MODE: postgres
+      STATE_BACKEND: postgres
+      FILE_STORE_MODE: rowfs
+      FILE_STORE_OTHERS: postgres
+      AGENTMEMORY_DB_CONFIG: /app/config/db.toml
+      TDAI_GATEWAY_API_KEY: ${TDAI_GATEWAY_API_KEY:?Set a gateway key outside Git}
+      TDAI_INSTANCE_ID: ${TDAI_INSTANCE_ID:-default}
+      MEMORY_EMBEDDING_BASE_URL: ${MEMORY_EMBEDDING_BASE_URL:?Set an OpenAI-compatible embedding URL}
+      MEMORY_EMBEDDING_API_KEY: ${MEMORY_EMBEDDING_API_KEY:?Set an embedding API key outside Git}
+      MEMORY_EMBEDDING_MODEL: ${MEMORY_EMBEDDING_MODEL:?Set the embedding model}
+      WORKER_CONCURRENCY: 2
+      TDAI_SKILL_WORKER_CONCURRENCY: 2
+    volumes:
+      - ../../config/db.toml:/app/config/db.toml:ro
+      - ../../MemoryCore/tdai-gateway.postgres.yaml:/data/config/tdai-gateway.yaml:ro
+      - core-work-cache:/data/tdai-memory
+    restart: unless-stopped
+  knowledge:
+    profiles: [knowledge]
+    build: ../../MemoryKnowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8421:8421"
+    environment:
+      AGENTMEMORY_DB_CONFIG: /app/config/db.toml
+      KNOWLEDGE_SERVICE_KEY: ${KNOWLEDGE_SERVICE_KEY:-}
+      KNOWLEDGE_PUBLIC_BASE_URL: ${KNOWLEDGE_PUBLIC_BASE_URL:-http://127.0.0.1:8421/v3}
+      KNOWLEDGE_DATA_DIR: /app/data
+      KNOWLEDGE_WIKI_INGEST_CONCURRENCY: 1
+      KNOWLEDGE_LLM_GLOBAL_CONCURRENCY: 1
+    command: ["--code-graph-only"]
+    volumes:
+      - ../../config/db.toml:/app/config/db.toml:ro
+      - knowledge-work-cache:/app/data
+    restart: unless-stopped
+volumes:
+  agentmemory-postgres:
+  core-work-cache:
+  knowledge-work-cache:

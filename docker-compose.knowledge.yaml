@@ -1,0 +1,36 @@
+# One component / one container. Run separately; do not merge with -f.
+# See INSTALL_CN.md for network setup, startup order and existing-volume migration.
+name: agentmemory-knowledge
+services:
+  knowledge:
+    build: ./MemoryKnowledge
+    ports:
+    - 127.0.0.1:8421:8421
+    environment:
+      AGENTMEMORY_DB_CONFIG: /app/config/db.toml
+      KNOWLEDGE_SERVICE_KEY: ${KNOWLEDGE_SERVICE_KEY:?Set a Knowledge service key outside Git}
+      KNOWLEDGE_PUBLIC_BASE_URL: ${KNOWLEDGE_PUBLIC_BASE_URL:-http://127.0.0.1:8421/v3}
+      KNOWLEDGE_DATA_DIR: /app/data
+      KNOWLEDGE_WIKI_INGEST_CONCURRENCY: 1
+      KNOWLEDGE_LLM_GLOBAL_CONCURRENCY: 1
+    command:
+    - --code-graph-only
+    volumes:
+    - type: bind
+      source: ./config/db.toml
+      target: /app/config/db.toml
+      read_only: true
+      bind:
+        create_host_path: false
+    - knowledge-work-cache:/app/data
+    restart: unless-stopped
+    networks:
+      shared:
+        aliases:
+        - knowledge
+networks:
+  shared:
+    external: true
+    name: ${AGENTMEMORY_NETWORK:-agentmemory}
+volumes:
+  knowledge-work-cache: {}

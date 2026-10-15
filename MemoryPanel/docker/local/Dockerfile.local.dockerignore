@@ -64,3 +64,6 @@ docs/
 tests/
 **/*.e2e.sh
 e2e-*.sh
+
+# Dockerfile-specific ignore takes precedence over .dockerignore.
+config/db.toml

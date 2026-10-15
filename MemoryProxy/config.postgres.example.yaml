@@ -1,0 +1,46 @@
+# Copy to config.yaml and replace all REPLACE_* values locally.
+# These fields do NOT expand shell environment variables.
+server:
+  host: 0.0.0.0
+  port: 8096
+upstream:
+  url: https://REPLACE_WITH_UPSTREAM_HOST/v1
+  apiKey: REPLACE_WITH_UPSTREAM_API_KEY
+storage:
+  enabled: true
+  backend: postgres
+redis:
+  enabled: false
+costGuard:
+  enabled: false
+log:
+  file: ""
+  backend: console
+# Fail closed for user requests; admin key is required by the Compose file.
+auth:
+  enabled: true
+  url: http://core:8420
+creditReport:
+  url: ""
+injection:
+  enabled: true
+  injectors: [skill, tdai-memory]
+sessionInit:
+  enabled: true
+tdai:
+  enabled: true
+  endpoint: http://core:8420
+  apiKey: REPLACE_WITH_GATEWAY_KEY
+  serviceId: default
+  memory:
+    enabled: true
+    inject: true
+    writeL0: true
+    recallL1: true
+    injectL2L3: true
+skill:
+  endpoint: http://core:8420
+  serviceToken: REPLACE_WITH_GATEWAY_KEY
+  serviceId: default
+knowledge:
+  enabled: false

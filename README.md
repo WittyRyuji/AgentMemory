@@ -12,7 +12,7 @@ cd AgentMemory
 ```
 
 1. 按 [当前安装与使用指南](INSTALL_CN.md) 配置 `config/db.toml` 和根目录 `.env`。
-2. 使用根目录 `docker-compose.postgres.yaml` 从源码启动 PostgreSQL + Core；Knowledge 按需启用。
+2. 每个组件独立一份 Compose：先启动 `docker-compose.postgres.yaml`，再启动 `docker-compose.core.yaml`；可选模块按需启动。
 3. 先验证 `/health`、写入及查询，再按需配置 Panel、Proxy 和 LLM 提取。
 
 **Embedding API Key 填哪里？** 填根目录 `.env` 的 `MEMORY_EMBEDDING_API_KEY`。同处填写 `MEMORY_EMBEDDING_BASE_URL` 和 `MEMORY_EMBEDDING_MODEL`。`MemoryCore/tdai-gateway.postgres.yaml` 的 `memory.embedding` 引用这些变量，Compose 将其传入 Core。`dimensions` 默认 `1536`，必须改成模型实际输出维数。详细示例见 [安装指南](INSTALL_CN.md)。
@@ -28,7 +28,9 @@ cd AgentMemory
 | [MemoryProxy](MemoryProxy/) | 转发 Agent 的模型请求，注入记忆、回写会话、会话绑定和限流 | `8096`；入口要求 Node 22.x |
 | [MemoryKnowledge](MemoryKnowledge/) | 文档 Wiki、代码图谱、知识工具与源文件生命周期 | `8421` |
 
-最小安装只需要 PostgreSQL + Core。根目录 Compose **不包含 Panel / Proxy**；Knowledge 是可选 profile，默认仅启用 CodeGraph。完整操作步骤见安装指南。
+完整部署共 **5 份 Compose / 5 个容器**：`docker-compose.postgres.yaml`、`docker-compose.core.yaml`、`docker-compose.panel.yaml`、`docker-compose.proxy.yaml`、`docker-compose.knowledge.yaml`。每份只有一个 service，独立启停，通过 external 网络互通。最小安装只需 PostgreSQL + Core 两个容器；Panel 内含 Web UI，pgvector 不另占容器。Knowledge 默认仅启用 CodeGraph。
+
+**已有安装必须先按[卷迁移步骤](INSTALL_CN.md#31-已有旧-compose-安装先迁移卷不要直接启动新版)核对旧 PostgreSQL 卷并停旧容器**，避免新旧布局并跑或连到空库。完整网络、配置、启动顺序见安装指南。
 
 ## 保留的使用能力
 

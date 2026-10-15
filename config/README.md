@@ -1,6 +1,6 @@
 # 共享数据库配置（当前 main）
 
-中文安装步骤及 Embedding Key 示例见 [安装指南](../INSTALL_CN.md)。这里只存数据库 URL；Embedding 配置在 `MemoryCore/tdai-gateway.postgres.yaml`，密钥在运行时环境。根 Compose 只启动 Core / 可选 Knowledge，不含 Panel / Proxy。
+中文安装步骤及 Embedding Key 示例见 [安装指南](../INSTALL_CN.md)。这里只存数据库 URL；Embedding 配置在 `MemoryCore/tdai-gateway.postgres.yaml`，密钥在运行时环境。根目录有五份单服务 Compose，PostgreSQL、Core、Panel、Proxy、Knowledge 各自独立启停。
 
 # Database configuration
 
@@ -54,10 +54,15 @@ this database file. No model is loaded or called by this configuration loader.
 
 Mount the private file read-only at `/app/config/db.toml` and set
 `AGENTMEMORY_DB_CONFIG=/app/config/db.toml` in **each** container. The root
-`docker-compose.postgres.yaml` does this for Core and Knowledge. In that example,
+`docker-compose.core.yaml`, `docker-compose.panel.yaml`,
+`docker-compose.proxy.yaml`, and `docker-compose.knowledge.yaml` each do this.
+All five separate Compose projects join the external `agentmemory` network;
 use the service hostname `postgres` in the file instead of `127.0.0.1`; the server's
-`POSTGRES_PASSWORD` must agree with the URL. Panel/Proxy use the same mount and
-variable in their existing deployment. The database itself is not exposed.
+`POSTGRES_PASSWORD` must agree with the URL. The database itself is not exposed.
+The Proxy runtime UID 10001 must be able to read its bind-mounted configuration;
+use narrowly scoped file permissions / ACLs, not world-readable credentials.
+Existing installations must select their confirmed old database volume using
+`POSTGRES_VOLUME` before starting the new layout. See the installation guide.
 
 The loader is authored once at `config/db-loader.ts`. Run
 `node scripts/sync-db-config.mjs` after changes. Checked-in identical copies in

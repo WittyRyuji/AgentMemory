@@ -45,7 +45,8 @@ Optional:
 Same settings via environment (-e), flags override unset env:
   KNOWLEDGE_PUBLIC_BASE_URL, TMC_CALLBACK_URL,
   LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_MODE,
-  PORT, KNOWLEDGE_DATA_DIR, KNOWLEDGE_POSTGRES_URL (required)
+  PORT, KNOWLEDGE_DATA_DIR, AGENTMEMORY_DB_CONFIG (shared TOML),
+  KNOWLEDGE_POSTGRES_URL (legacy fallback)
 
 Examples:
   # Full (wiki + code-graph + TMC callback)
@@ -221,8 +222,10 @@ main() {
 
   export PORT
   export KNOWLEDGE_DATA_DIR="$DATA_DIR"
-  if [[ -z "${KNOWLEDGE_POSTGRES_URL:-${DATABASE_URL:-}}" ]]; then
-    echo "error: KNOWLEDGE_POSTGRES_URL is required (PostgreSQL durable store)" >&2
+  # The application loader parses TOML and rejects conflicting legacy URLs.
+  # Do not reject a valid shared-file deployment before Node gets to read it.
+  if [[ -z "${KNOWLEDGE_POSTGRES_URL:-${DATABASE_URL:-}}" && ! -r "${AGENTMEMORY_DB_CONFIG:-/app/config/db.toml}" ]]; then
+    echo "error: readable database TOML or legacy PostgreSQL URL is required" >&2
     exit 1
   fi
   export NODE_ENV="${NODE_ENV:-production}"

@@ -1,0 +1,49 @@
+# One component / one container. Run separately; do not merge with -f.
+# See INSTALL_CN.md for network setup, startup order and existing-volume migration.
+name: agentmemory-panel
+services:
+  panel:
+    build:
+      context: ./MemoryPanel
+      dockerfile: docker/local/Dockerfile.local
+      args:
+        PANEL_UI: web
+    ports:
+    - 127.0.0.1:8123:8123
+    environment:
+      HOST: 0.0.0.0
+      PORT: '8123'
+      PANEL_STATE_BACKEND: postgres
+      AGENTMEMORY_DB_CONFIG: /app/config/db.toml
+      METADATA_INSTANCES_CONFIG: /app/config/metadata-instances.json
+      PANEL_AUTH_MODE: user_key
+      PANEL_AUTH_SESSION_SECRET_FILE: /app/data/panel-session-secret
+      KNOWLEDGE_SERVICE_URL: http://knowledge:8421
+      KNOWLEDGE_AUTH_TOKEN: ${KNOWLEDGE_SERVICE_KEY:-}
+      KNOWLEDGE_LLM_BINDING_SYNC: 'false'
+      KNOWLEDGE_LLM_PROXY_BASE_URL: http://proxy:8096
+    volumes:
+    - type: bind
+      source: ./config/db.toml
+      target: /app/config/db.toml
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./MemoryPanel/config/metadata-instances.json
+      target: /app/config/metadata-instances.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - panel-data:/app/data
+    restart: unless-stopped
+    networks:
+      shared:
+        aliases:
+        - panel
+networks:
+  shared:
+    external: true
+    name: ${AGENTMEMORY_NETWORK:-agentmemory}
+volumes:
+  panel-data: {}

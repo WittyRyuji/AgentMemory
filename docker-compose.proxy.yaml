@@ -1,0 +1,37 @@
+# One component / one container. Run separately; do not merge with -f.
+# See INSTALL_CN.md for network setup, startup order and existing-volume migration.
+name: agentmemory-proxy
+services:
+  proxy:
+    build: ./MemoryProxy
+    ports:
+    - 127.0.0.1:8096:8096
+    environment:
+      AGENTMEMORY_DB_CONFIG: /app/config/db.toml
+      PROXY_STORAGE_BACKEND: postgres
+      TDAI_PROXY_ADMIN_API_KEY: ${TDAI_PROXY_ADMIN_API_KEY:?Set a separate Proxy admin key outside Git}
+    volumes:
+    - type: bind
+      source: ./config/db.toml
+      target: /app/config/db.toml
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./MemoryProxy/config.yaml
+      target: /data/config.yaml
+      read_only: true
+      bind:
+        create_host_path: false
+    - proxy-work-cache:/data/tdai-memory-proxy
+    restart: unless-stopped
+    networks:
+      shared:
+        aliases:
+        - proxy
+networks:
+  shared:
+    external: true
+    name: ${AGENTMEMORY_NETWORK:-agentmemory}
+volumes:
+  proxy-work-cache: {}

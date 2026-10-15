@@ -38,6 +38,8 @@ url = "postgresql://agentmemory:REPLACE_WITH_DB_PASSWORD@postgres:5432/agentmemo
 
 ```dotenv
 POSTGRES_PASSWORD=REPLACE_WITH_DB_PASSWORD
+POSTGRES_VOLUME=agentmemory-postgres
+AGENTMEMORY_NETWORK=agentmemory
 TDAI_GATEWAY_API_KEY=REPLACE_WITH_A_LONG_RANDOM_GATEWAY_KEY
 TDAI_INSTANCE_ID=default
 MEMORY_EMBEDDING_BASE_URL=https://embedding.example.com/v1
@@ -79,35 +81,84 @@ memory:
 
 `.env` 和 `config/db.toml` 已被 Git 忽略；不要提交、截图、粘贴日志或把它们打包进镜像。不要把真值直接写入受版本管理的 YAML。含 `$` 等字符的 `.env` 值需遵循 Compose 的引号 / 插值规则；不要 `source` 不可信文件。避免将展开后的 `docker compose config` 输出分享给别人，其中可能包含密钥。
 
-## 3. 启动 PostgreSQL + Core
+## 3. 一个组件一个 Compose：共 5 个容器
+
+| 组件 | 根目录 Compose 文件 | 必需 / 可选 |
+| --- | --- | --- |
+| PostgreSQL + pgvector | `docker-compose.postgres.yaml` | 必需，pgvector 是扩展，不另占容器 |
+| Core | `docker-compose.core.yaml` | 必需 |
+| Panel（含编译后的 Web UI） | `docker-compose.panel.yaml` | 可选 |
+| Proxy | `docker-compose.proxy.yaml` | 可选 |
+| Knowledge | `docker-compose.knowledge.yaml` | 可选，默认仅 CodeGraph |
+
+完整部署 **5 份 Compose、5 个容器**；最小部署 **2 个**。每份仅一个 service、一个固定且不同的 project name，不使用跨文件 `depends_on`。不要用多个 `-f` 合并运行，也不要给所有文件设置同一个 `-p` / `COMPOSE_PROJECT_NAME`。按下面顺序启动并检查依赖就绪。外部网络只供这套部署使用，服务名 `postgres`、`core`、`panel`、`proxy`、`knowledge` 是稳定 DNS。第二套部署需另选网络、项目名、卷名和宿主端口，避免别名冲突。
+
+### 3.1 已有旧 Compose 安装：先迁移卷，不要直接启动新版
+
+旧根 Compose 同时运行 PostgreSQL / Core / Knowledge；现在同名文件只负责 PostgreSQL。旧数据库卷通常为 `<旧项目名>_agentmemory-postgres`，不能想当然使用新卷，否则会看到空库。
+
+1. 停写并备份数据库和配置。更新代码前记录旧项目名和数据库容器实际挂载的卷：
+
+   ```sh
+   docker compose ls
+   docker inspect OLD_POSTGRES_CONTAINER --format '{{range .Mounts}}{{println .Type .Name .Destination}}{{end}}'
+   ```
+
+2. 将真实卷名填入根 `.env` 的 `POSTGRES_VOLUME`。如果不是 Docker named volume，先制定对应存储迁移方案，不套用这些命令。
+3. 更新代码后，以原项目名使用保留的旧布局停止旧容器（将 `OLD_PROJECT` 替换为实际名称；原先用过 knowledge profile 时同样适用）：
+
+   ```sh
+   docker compose --env-file .env -p OLD_PROJECT -f deploy/legacy/docker-compose.postgres.yaml --profile knowledge down
+   ```
+
+   **不要加 `-v`，不要删旧卷，不允许两个 PostgreSQL 容器同时挂同一数据卷。** 旧布局保留原始必填环境变量要求；使用旧安装的 `.env`。原来的 Core / Knowledge 工作卷也保留，但新项目会建新的缓存卷；业务数据从 PostgreSQL 恢复，本地额外文件需自行检查备份。已有 Panel 迁移还必须保留原 `panel-session-secret`，见第 7 节。
+4. 先 `docker volume inspect` 核对旧卷存在，再按下一节启动；不要为拼错的旧卷名执行 `docker volume create`。验证原用户、会话和数据仍在后再恢复写入。
+
+### 3.2 新安装：准备外部网络和数据库卷
+
+以下默认名与上面的 `.env` 一致；已有安装使用核对过的卷名，跳过创建数据库卷：
 
 ```sh
-docker compose --env-file .env -f docker-compose.postgres.yaml up -d --build postgres core
-docker compose --env-file .env -f docker-compose.postgres.yaml ps
+docker network inspect agentmemory >/dev/null 2>&1 || docker network create agentmemory
+# 仅新安装执行；已有安装不得用它代替卷核对：
+docker volume create agentmemory-postgres
+```
+
+这些资源由部署者显式创建。PostgreSQL 卷声明为 external，Compose 找不到会拒绝启动，避免静默生成空库；各组件 `down` 不会删除共享网络或外部数据库卷。
+
+### 3.3 分别启动 PostgreSQL、Core
+
+```sh
+docker compose --env-file .env -f docker-compose.postgres.yaml up -d --wait
+docker compose --env-file .env -f docker-compose.core.yaml up -d --build --wait
 curl -fsS http://127.0.0.1:8420/health
 ```
 
-Compose 会将 Embedding 三个变量传入 Core，并只读挂载数据库 TOML 和 Gateway YAML。数据库不映射宿主端口；Core 仅映射 `127.0.0.1:8420`。首次镜像构建需要下载依赖。
+使用支持 `up --wait` 的 Compose v2。PostgreSQL 就绪后才启动 Core。Compose 将 Embedding 三个变量传入 Core，并只读挂载数据库 TOML 和 Gateway YAML；配置文件不存在会报错，不会创建同名目录。数据库不映射宿主端口；所有 HTTP 端口仅映射 `127.0.0.1`。首次构建需要下载依赖。
 
-检查健康响应的存储和状态连接信息；`/health` 成功不等于外部 Embedding 或 LLM 调用成功。排错可在本机查看：
+健康检查只证明相应服务的健康端点响应，不证明外部 Embedding / LLM 或完整模块联调成功。逐个查看状态 / 日志：
 
 ```sh
-docker compose --env-file .env -f docker-compose.postgres.yaml logs --tail=100 core postgres
+docker compose --env-file .env -f docker-compose.postgres.yaml ps
+docker compose --env-file .env -f docker-compose.core.yaml ps
+docker compose --env-file .env -f docker-compose.core.yaml logs --tail=100
 ```
 
-修改 `.env` 后重建容器使环境生效（仅 `restart` 不更新环境）：
+修改 `.env` 后重新创建对应容器，不能只 `restart`：
 
 ```sh
-docker compose --env-file .env -f docker-compose.postgres.yaml up -d --force-recreate core
+docker compose --env-file .env -f docker-compose.core.yaml up -d --force-recreate --wait
 ```
 
-停止且保留数据：
+单独停止 Core 不影响 PostgreSQL：
 
 ```sh
+docker compose --env-file .env -f docker-compose.core.yaml down
+# 停止数据库前，先停止所有使用它的应用组件：
 docker compose --env-file .env -f docker-compose.postgres.yaml down
 ```
 
-不要在有用数据上使用 `down -v`，它会删除数据库卷。修改 `POSTGRES_PASSWORD` 不会更改已初始化数据库的密码；需按数据库管理流程修改实际角色密码及所有连接配置。
+可选组件同理使用各自文件的 `ps`、`logs`、`up`、`down`。不要在有用数据上使用 `down -v`，它仍会删除非 external 的应用卷，尤其 Panel 的认证 secret。修改 `POSTGRES_PASSWORD` 不会更改已初始化数据库密码；需按数据库管理流程修改实际角色密码及所有连接配置。
 
 ## 4. 最小写入 / 查询验证
 
@@ -144,7 +195,7 @@ unset GATEWAY_KEY
    ```
 
 3. 所有者在浏览器确认 AgentMemory 自己的授权；使用 `models` 实际返回的模型 slug 设置 YAML `llm.provider: oauth` 及其 `oauth` 块，随后显式启用提取。
-4. CLI 和 Core 必须使用同一数据库、加密密钥、account 和 vaultId。根 Compose **没有传入 OAuth 密钥**，需要通过受保护的 Compose override / secret 注入配置将命名环境变量传给 Core，并重新创建容器。
+4. CLI 和 Core 必须使用同一数据库、加密密钥、account 和 vaultId。Core Compose **没有传入 OAuth 密钥**，需要通过受保护的 Compose override / secret 注入配置将命名环境变量传给 Core，并重新创建容器。
 
 Compose 的 `postgres` 仅在容器网络可解析，数据库默认不对宿主发布。主机 CLI 不能直接照抄此连接串；应选择安全可达的同一数据库部署 / 网络方案。远程登录需要精确的 SSH 回环转发，不得公开 OAuth callback。
 
@@ -154,20 +205,64 @@ OAuth 不借用 Codex / Hermes / OpenClaw 会话，不提供 Embedding API，也
 
 ## 6. 可选：Knowledge
 
-最小 Compose profile 仅启用 CodeGraph：
+独立 Knowledge Compose 仅启用 CodeGraph；先确保 PostgreSQL 已健康：
 
 ```sh
 # 先在根 .env 设置非空 KNOWLEDGE_SERVICE_KEY
 # 调用方使用相同服务凭证；不要将未保护服务暴露到公网。
-docker compose --env-file .env -f docker-compose.postgres.yaml --profile knowledge up -d --build
+docker compose --env-file .env -f docker-compose.knowledge.yaml up -d --build --wait
 curl -fsS http://127.0.0.1:8421/health
 ```
 
 默认命令为 `--code-graph-only`。Wiki 需要额外配置它自己的 LLM 路径及绑定，不能把 CodeGraph 健康当作 Wiki 已就绪。完整功能、迁移和持久化边界见 [Knowledge README](MemoryKnowledge/README.md) 和 [Knowledge PostgreSQL](MemoryKnowledge/POSTGRES.md)。
 
-## 7. 可选：Panel 与 Proxy（独立源码服务）
+## 7. 可选：Panel 与 Proxy
 
-根 Compose 不会启动这两个服务。以下以四模块都能访问同一**原生 / 外部 PostgreSQL**为前提：根 `config/db.toml` 使用对主机可达的数据库 URL。如果 Core / Knowledge 在容器内，主机与容器的数据库地址可能不同，应为每个运行环境用 `AGENTMEMORY_DB_CONFIG` 指向受保护、等价的配置，不要为了示例向公网开放数据库。
+### 容器启动（推荐与前文配套）
+
+先准备 Panel 注册表：
+
+```sh
+cp MemoryPanel/config/metadata-instances.example.json MemoryPanel/config/metadata-instances.json
+chmod 600 MemoryPanel/config/metadata-instances.json
+```
+
+只保留实际实例，`id` 与 Core 一致，`api_key` 填 Gateway Key。容器内调用 Core 使用 `http://core:8420`；`proxy_endpoint` 用于客户端接入展示，应填写**客户端可达的地址**，本机使用 `http://127.0.0.1:8096`（不用容器内部 DNS）。未部署 Proxy 则省略该字段：
+
+```json
+{"instances":[{"id":"default","name":"本地 AgentMemory","gateway_endpoint":"http://core:8420","proxy_endpoint":"http://127.0.0.1:8096","api_key":"REPLACE_WITH_GATEWAY_KEY"}]}
+```
+
+```sh
+docker compose --env-file .env -f docker-compose.panel.yaml up -d --build --wait
+curl -fsS http://127.0.0.1:8123/health
+```
+
+浏览器打开 `http://127.0.0.1:8123`；此容器同时托管构建后的 Web UI，不需要另起前端容器。构建 UI 失败应修复依赖 / 构建问题，不应把 `WEB_UI=0` 占位页当成功界面。首次管理员初始化见下方通用命令。Panel 默认关闭 Knowledge LLM binding 同步，部署 Wiki 并配置好 Proxy 后才按 Knowledge 指南启用。
+
+`agentmemory-panel_panel-data` 卷保留 `/app/data/panel-session-secret`，需连同数据库独立备份。已有 Panel 迁移必须在首次启动前把原 secret 按原内容和安全权限放到此卷的对应路径，不能让新容器替换生成，否则旧加密身份绑定无法解密。若已有 Panel 使用其他卷，可以在受保护 override 中把 `panel-data` 映射为确认过的 external 卷。
+
+Proxy 先创建专用 PG 配置，不直接使用包含大量占位集成的完整版模板：
+
+```sh
+cp MemoryProxy/config.postgres.example.yaml MemoryProxy/config.yaml
+chmod 600 MemoryProxy/config.yaml
+```
+
+编辑 `upstream.url` / `upstream.apiKey` 为真实且协议兼容的模型上游；`tdai.apiKey` 和 `skill.serviceToken` 填 Gateway Key，两个 `serviceId` 与 Core 实例一致。这些 YAML 字段**不会展开 `${VAR}`**，需在本地受保护文件填写实际值。根 `.env` 另加非空 `TDAI_PROXY_ADMIN_API_KEY`，用于 Proxy 运维接口鉴权（独立于普通用户 key）。数据库仍来自根 `config/db.toml`。
+
+Proxy 镜像以 UID `10001` 运行。两个只读 bind 文件 `config/db.toml`、`MemoryProxy/config.yaml` 必须能被容器内该 UID 读取；不要为了方便设为全员可读。Linux 无 user namespace 映射时可给该 UID 精确只读 ACL，例如 `setfacl -m u:10001:r config/db.toml MemoryProxy/config.yaml`，目录需有必要遍历权限。Docker Desktop / rootless / user namespace 下应按实际 UID 映射设置权限并验证；不要照搬 Linux ACL 或把容器改成 root 绕过。
+
+```sh
+docker compose --env-file .env -f docker-compose.proxy.yaml up -d --build --wait
+curl -fsS http://127.0.0.1:8096/health
+```
+
+Proxy / Panel 启动前 Core 应已健康；Knowledge 可独立于这两个组件启动 CodeGraph。Wiki、真实上游推理和用户登录需单独验证；没有上游 Key 时不要启动 Proxy 并期待它代用 Embedding Key / Core OAuth。完整客户端接入说明见本节末尾。
+
+### 不使用容器时：原生源码服务
+
+以下只适用于原生启动。根 `config/db.toml` 使用对主机可达的数据库 URL；不能直接使用 Docker 网络内的 `postgres`。混合运行时通过 `AGENTMEMORY_DB_CONFIG` 为每个环境选择受保护的等价配置，不要向公网开放数据库。
 
 ### Panel 管理界面
 
@@ -275,6 +370,8 @@ node --env-file=../.env --import tsx src/gateway/server.ts
 
 ```sh
 node scripts/sync-db-config.mjs --check
+node scripts/check-compose.mjs  # 需先安装 MemoryProxy 依赖
+bash scripts/check-knowledge-entrypoint.sh
 (cd MemoryCore && npm run typecheck:postgres && npm run test:postgres && npm run typecheck:oauth && npm run test:oauth)
 (cd MemoryPanel && npm run typecheck && npm test)
 (cd MemoryProxy && npm run typecheck && npm test)

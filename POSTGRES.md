@@ -38,11 +38,26 @@ sets PG-compatible default storage modes. Old module-specific URL variables and
 `DATABASE_URL` remain supported when the default file is absent. With a file,
 conflicting legacy values fail instead of silently selecting another database.
 
-`docker-compose.postgres.yaml` is a local validation example, not an already
- deployed service. It mounts `config/db.toml` read-only in Core/Knowledge and
-runs PostgreSQL 17 with pgvector. Use hostname `postgres` in its shared URL.
-Core/Knowledge ports bind to loopback. Keep Panel/Proxy's existing deployment
-configuration and mount the same file as described in the configuration guide.
+The root deployment now has five separate, single-service Compose files:
+`docker-compose.postgres.yaml`, `docker-compose.core.yaml`,
+`docker-compose.panel.yaml`, `docker-compose.proxy.yaml`, and
+`docker-compose.knowledge.yaml`. PostgreSQL + Core are the minimum two containers.
+Each file has its own project name and joins one explicitly created external network;
+start PostgreSQL and wait for health before starting applications. Do not merge the
+files with multiple `-f` arguments or override them all with the same project name.
+All four applications mount `config/db.toml` read-only; use hostname `postgres`.
+Published HTTP ports bind to loopback. Panel serves its built UI in the same container.
+These are deployment examples, not an already validated live Compose deployment.
+
+**Existing installations:** the former combined root file is preserved under
+`deploy/legacy/docker-compose.postgres.yaml` only as a migration aid. Stop it using
+the original project name, without `-v`, before starting the new layout. Set
+`POSTGRES_VOLUME` to the actual old named volume; the new PostgreSQL file requires
+an existing external volume and will not create one implicitly. Never mount the
+same PG data directory in two running servers. Preserve Panel's encryption secret
+when moving an existing Panel. See the [Chinese installation guide](INSTALL_CN.md)
+for exact preparation, migration, startup and permissions steps.
+
 Do not expose PostgreSQL. Use authenticated TLS termination for the gateway and
 certificate-verified TLS for a remote database. Provision `vector` in `public`
 when the application role cannot create extensions. Back up the full database.
