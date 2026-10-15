@@ -1,38 +1,30 @@
-# AgentMemory（当前 main 安装与使用）
+# AgentMemory
 
-AgentMemory 基于 TencentDB Agent Memory，提供跨会话记忆、Skill、Wiki / CodeGraph 和团队资产管理。本仓库 `main` 已集成 PostgreSQL + pgvector 存储及独立 OAuth 推理入口，保留原有 Gateway、SDK、团队 / Agent ACL 与旧存储模式。
+基于 TencentDB Agent Memory 的自托管 Agent 记忆服务。本仓库 `main` 使用 PostgreSQL + pgvector 持久化数据，提供独立 OAuth 推理入口，并保留 Gateway / SDK 与团队、Agent 权限能力。
 
-> 请明确使用 `main`。仓库默认分支可能仍是 `feat/server_team`；旧版公共镜像和 `deploy/global-images/start-all.sh` 不代表本分支的 PostgreSQL 配置。
+## 快速开始
 
-## 从这里开始
+按照 [安装 → 调用 → 最小验证](INSTALL_CN.md) 顺序完成：
 
-```sh
-git clone --branch main --single-branch https://github.com/WittyRyuji/AgentMemory.git
-cd AgentMemory
-```
+1. 安装 PostgreSQL + Core，填写数据库密码和 Embedding 配置。
+2. 调用 `/capture` 写入对话，再用 `/search/conversations` 查回。
+3. 对照健康状态、写入条数和查询内容确认成功。
 
-1. 按 [当前安装与使用指南](INSTALL_CN.md) 配置 `config/db.toml` 和根目录 `.env`。
-2. 每个组件独立一份 Compose：先启动 `docker-compose.postgres.yaml`，再启动 `docker-compose.core.yaml`；可选模块按需启动。
-3. 先验证 `/health`、写入及查询，再按需配置 Panel、Proxy 和 LLM 提取。
+最小安装只需 **2 个容器**。默认先保存和查询 L0 原始对话；结构化记忆与 Skill 需要另行配置 LLM 并启用异步提取。
 
-**Embedding API Key 填哪里？** 填根目录 `.env` 的 `MEMORY_EMBEDDING_API_KEY`。同处填写 `MEMORY_EMBEDDING_ENDPOINT`（完整请求地址，不追加路径）和 `MEMORY_EMBEDDING_MODEL`。火山 `/api/v3/embeddings/multimodal` 可直接填写，并设置 `MEMORY_EMBEDDING_FORMAT=ark-multimodal`。`MemoryCore/tdai-gateway.postgres.yaml` 的 `memory.embedding` 引用这些变量，Compose 将其传入 Core。`dimensions` 默认 `1536`，必须改成模型实际输出维数（火山示例为 `2048`）。旧 `BASE_URL` 保留为回退，完整 endpoint 优先。详细示例见 [安装指南](INSTALL_CN.md)。
+## 按需扩展
 
-数据库密码只填根 `.env` 的 `POSTGRES_PASSWORD`，`config/db.toml` 通过 `password_env` 引用，自动编码；Embedding Key、Gateway Key、OAuth 加密密钥用途不同。ChatGPT OAuth 仅用于已授权的推理，不提供 Embedding API，也不会自动启用 Proxy 上游或 Knowledge Wiki 的 LLM。
-
-## 四个模块
-
-| 模块 | 职责 | 当前入口 / 默认端口 |
+| 组件 | 用途 | 本机端口 |
 | --- | --- | --- |
-| [MemoryCore](MemoryCore/) | L0 对话、L1 原子记忆、L2/L3 归纳，Skill、元数据、权限和异步任务 | Gateway `8420` |
-| [MemoryPanel](MemoryPanel/) | 用户、团队、Agent、任务及资产管理界面 | 后端 `8123`，开发前端 `5173` |
-| [MemoryProxy](MemoryProxy/) | 转发 Agent 的模型请求，注入记忆、回写会话、会话绑定和限流 | `8096`；入口要求 Node 22.x |
-| [MemoryKnowledge](MemoryKnowledge/) | 文档 Wiki、代码图谱、知识工具与源文件生命周期 | `8421` |
+| PostgreSQL + pgvector | 共享持久化存储 | 不发布 |
+| Core | 对话、记忆、Skill、权限和任务 API | 8420 |
+| [Panel](OPTIONAL_CN.md#panel) | 用户、团队、Agent 和资产管理，内含 Web UI | 8123 |
+| [Proxy](OPTIONAL_CN.md#proxy) | 转发模型请求，注入记忆与回写会话 | 8096 |
+| [Knowledge](OPTIONAL_CN.md#knowledge) | CodeGraph / Wiki，默认仅开启 CodeGraph | 8421 |
 
-完整部署共 **5 份 Compose / 5 个容器**：`docker-compose.postgres.yaml`、`docker-compose.core.yaml`、`docker-compose.panel.yaml`、`docker-compose.proxy.yaml`、`docker-compose.knowledge.yaml`。每份只有一个 service，独立启停，通过 external 网络互通。最小安装只需 PostgreSQL + Core 两个容器；Panel 内含 Web UI，pgvector 不另占容器。Knowledge 默认仅启用 CodeGraph。
+完整部署为 **5 份 Compose / 5 个容器**，各自独立启停。已有安装先看 [卷迁移](OPERATIONS_CN.md#migration)。
 
-**已有安装必须先按[卷迁移步骤](INSTALL_CN.md#31-已有旧-compose-安装先迁移卷不要直接启动新版)核对旧 PostgreSQL 卷并停旧容器**，避免新旧布局并跑或连到空库。完整网络、配置、启动顺序见安装指南。
-
-## 保留的使用能力
+## 能力
 
 - 分层记忆：保存原始会话，检索事实与上下文；配置 LLM 后进行 L1/L2/L3 和 Skill 提取。
 - 共享资产：Skill 版本与资源、Wiki 文档关系、CodeGraph 符号与调用关系，按团队和 Agent 绑定。
@@ -41,21 +33,20 @@ cd AgentMemory
 - 持久化：PG 保存权威业务数据、任务状态与文件对象；CodeGraph 的本地 SQLite 是可重建索引，配置、临时工作目录、日志仍在磁盘。
 - 兼容：原 SQLite / Tencent / Mongo / COS 等路径仍保留；原地迁移必须停写、备份并使用对应迁移工具，不能仅更换连接串。
 
-## 配置与文档
+## 文档
 
-- [安装、Embedding、启动、健康检查与首次使用](INSTALL_CN.md)
-- [共享数据库配置和优先级](config/README.md)
-- [PostgreSQL 范围、限制和离线迁移](POSTGRES.md)
-- [独立 OAuth 登录、模型选择、退出及安全要求](OAUTH.md)
+- [安装、调用与最小验证](INSTALL_CN.md)
+- [Embedding（含方舟完整 endpoint）](EMBEDDING_CN.md) · [OAuth 授权与推理](OAUTH.md)
+- [可选模块与 Agent 接入](OPTIONAL_CN.md) · [原生部署](NATIVE_CN.md)
+- [迁移、日常运维与排错](OPERATIONS_CN.md) · [数据库配置](config/README.md) · [PostgreSQL 范围与迁移工具](POSTGRES.md)
 - API：[Core](MemoryCore/v3-api-memorycore-doc.md)、[Panel](MemoryPanel/panel-api-doc.md)、[Proxy](MemoryProxy/v3-api-memoryproxy-doc.md)、[Knowledge](MemoryKnowledge/v3-api-memoryknowledge-doc.md)
-- [旧版镜像及各客户端接入参考](INSTALL.md)：涉及镜像、存储和密钥配置时，以当前指南为准。
-- [贡献指南](CONTRIBUTING_CN.md) · [上游路线图（不是本分支交付承诺）](ROADMAP_CN.md) · [MIT 许可证](LICENSE)
+- [历史镜像及客户端参考](INSTALL_LEGACY_CN.md) · [贡献指南](CONTRIBUTING_CN.md) · [上游路线图](ROADMAP_CN.md) · [许可证](LICENSE)
 
 ## 验证边界
 
-基线 `3f8aee8` 的 GitHub PostgreSQL CI 四模块共 297 项通过；另外原生 PostgreSQL 17.11 + pgvector 0.8.0 验证共 253 项通过。Core 已完成真实 HTTP 写入、检索和应用 / 数据库重启持久化检查，但 Embedding 使用合成测试端点。
+四模块 PostgreSQL 契约 / 集成测试、OAuth 模拟测试和 Compose 静态配置检查已有通过记录。Core 的真实 HTTP 写入、检索及重启持久化检查使用过真实 PostgreSQL，但 Embedding 使用合成端点，详见 [验证记录](POSTGRES.md#verification-evidence)。
 
-Panel、Proxy、Knowledge 的原生数据库契约 / 集成测试已通过，不等于独立 HTTP 全链路已验证。Docker Compose、真实 Embedding 提供商、真实账号 OAuth 授权与推理、生产迁移和提取质量仍需部署者验证。默认配置关闭 LLM 提取；健康检查通过不代表这些外部能力已可用。
+尚未完成五容器实际联调、真实 Embedding（包括方舟）、真实账号 OAuth 授权与推理、生产迁移和提取质量验证。健康检查与 L0 查询通过不代表这些能力可用。
 
 ## 致谢
 
