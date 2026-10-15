@@ -674,6 +674,11 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     memoryCompatRaw.promptMode = topLevelPromptMode;
   }
   memoryCompatRaw.postgres = { ...obj(memoryCompatRaw, "postgres"), instanceId: env("TDAI_INSTANCE_ID") ?? str(fileConfig, "instanceId") ?? "default" };
+  // Apply legacy top-level overrides before parsing so both forms receive the
+  // same enablement and validation (including endpoint-only configurations).
+  if (fileConfig.embedding && typeof fileConfig.embedding === "object" && !Array.isArray(fileConfig.embedding)) {
+    memoryCompatRaw.embedding = { ...obj(memoryCompatRaw, "embedding"), ...obj(fileConfig, "embedding") };
+  }
   const memory = parseMemoryConfig(memoryCompatRaw);
 
   // ── Standalone LLM override pass-through to MemoryTdaiConfig.llm ──
@@ -700,30 +705,6 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
       proxy: {
         useMemorySystemUserKey: llm.proxy?.useMemorySystemUserKey ?? true,
       },
-    };
-  }
-
-  // ── Standalone embedding override pass-through ──
-  // Some existing gateway configs place `embedding` at the top level next to
-  // `llm`. The memory parser expects it under `memory.embedding`, so splice the
-  // top-level block into MemoryTdaiConfig for backward compatibility.
-  const topLevelEmbedding = obj(fileConfig, "embedding");
-  if (topLevelEmbedding) {
-    memory.embedding = {
-      ...memory.embedding,
-      enabled: bool(topLevelEmbedding, "enabled") ?? memory.embedding.enabled,
-      provider: str(topLevelEmbedding, "provider") ?? memory.embedding.provider,
-      baseUrl: str(topLevelEmbedding, "baseUrl") ?? memory.embedding.baseUrl,
-      apiKey: str(topLevelEmbedding, "apiKey") ?? memory.embedding.apiKey,
-      model: str(topLevelEmbedding, "model") ?? memory.embedding.model,
-      dimensions: num(topLevelEmbedding, "dimensions") ?? memory.embedding.dimensions,
-      sendDimensions: bool(topLevelEmbedding, "sendDimensions") ?? memory.embedding.sendDimensions,
-      conflictRecallTopK: num(topLevelEmbedding, "conflictRecallTopK") ?? memory.embedding.conflictRecallTopK,
-      maxInputChars: num(topLevelEmbedding, "maxInputChars") ?? memory.embedding.maxInputChars,
-      timeoutMs: num(topLevelEmbedding, "timeoutMs") ?? memory.embedding.timeoutMs,
-      recallTimeoutMs: num(topLevelEmbedding, "recallTimeoutMs") ?? memory.embedding.recallTimeoutMs,
-      captureTimeoutMs: num(topLevelEmbedding, "captureTimeoutMs") ?? memory.embedding.captureTimeoutMs,
-      proxyUrl: str(topLevelEmbedding, "proxyUrl") ?? memory.embedding.proxyUrl,
     };
   }
 

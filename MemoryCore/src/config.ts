@@ -133,8 +133,11 @@ export interface EmbeddingConfig {
   enabled: boolean;
   /** Embedding provider: default "none" disables vector search; other values (e.g. "openai", "deepseek") are treated as OpenAI-compatible remote providers. */
   provider: string;
-  /** API Base URL (required for remote provider). */
+  /** Legacy API root; used only when endpoint is not set. */
   baseUrl: string;
+  /** Complete URL, preferred over baseUrl; never appended to. */
+  endpoint?: string;
+  format?: "openai" | "ark-multimodal";
   /** API Key (required for remote provider). */
   apiKey: string;
   /** Model name (required for remote provider). */
@@ -501,6 +504,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
 
   // Embedding config: determine provider based on user input and apiKey availability
   const embeddingApiKey = str(embeddingGroup, "apiKey") ?? "";
+  const embeddingEndpoint = str(embeddingGroup, "endpoint") || undefined;
+  const embeddingFormat = str(embeddingGroup, "format") ?? "openai";
   const embeddingBaseUrl = str(embeddingGroup, "baseUrl") ?? "";
   const embeddingProviderRaw = str(embeddingGroup, "provider") ?? "none";
   const embeddingModelRaw = str(embeddingGroup, "model") ?? "";
@@ -530,14 +535,14 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
     // qclaw provider: requires proxyUrl for local proxy forwarding
     const missingFields: string[] = [];
     if (!embeddingProxyUrl) missingFields.push("proxyUrl");
-    if (!embeddingBaseUrl) missingFields.push("baseUrl");
+    if (!embeddingEndpoint && !embeddingBaseUrl) missingFields.push("endpoint or baseUrl");
     if (!embeddingApiKey) missingFields.push("apiKey");
     if (!embeddingModelRaw) missingFields.push("model");
-    if (embeddingDimensionsRaw == null || embeddingDimensionsRaw <= 0) missingFields.push("dimensions");
+    if (embeddingDimensionsRaw == null || !Number.isInteger(embeddingDimensionsRaw) || embeddingDimensionsRaw <= 0) missingFields.push("dimensions");
 
     if (missingFields.length > 0) {
       const errorMsg =
-        `Embedding provider 'qclaw' requires 'proxyUrl', 'baseUrl', 'apiKey', 'model', and 'dimensions' to be set. ` +
+        `Embedding provider 'qclaw' requires 'proxyUrl', 'endpoint or baseUrl', 'apiKey', 'model', and 'dimensions' to be set. ` +
         `Missing: ${missingFields.join(", ")}. Embedding has been disabled.`;
       embeddingConfigError = errorMsg;
       embeddingEnabled = false;
@@ -549,15 +554,15 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
     // Remote mode — validate all required fields
     const missingFields: string[] = [];
     if (!embeddingApiKey) missingFields.push("apiKey");
-    if (!embeddingBaseUrl) missingFields.push("baseUrl");
+    if (!embeddingEndpoint && !embeddingBaseUrl) missingFields.push("endpoint or baseUrl");
     if (!embeddingModelRaw) missingFields.push("model");
-    if (embeddingDimensionsRaw == null || embeddingDimensionsRaw <= 0) missingFields.push("dimensions");
+    if (embeddingDimensionsRaw == null || !Number.isInteger(embeddingDimensionsRaw) || embeddingDimensionsRaw <= 0) missingFields.push("dimensions");
 
     if (missingFields.length > 0) {
       // Configuration error: disable embedding and log detailed error
       // This does NOT throw — the plugin continues running without vector search
       const errorMsg =
-        `Remote embedding provider '${embeddingProviderRaw}' requires 'apiKey', 'baseUrl', 'model', and 'dimensions' to be set. ` +
+        `Remote embedding provider '${embeddingProviderRaw}' requires 'apiKey', 'endpoint or baseUrl', 'model', and 'dimensions' to be set. ` +
         `Missing: ${missingFields.join(", ")}. Embedding has been disabled.`;
       // We store the error message so the caller (index.ts) can log it
       embeddingConfigError = errorMsg;
@@ -566,6 +571,11 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
     } else {
       embeddingProvider = embeddingProviderRaw;
     }
+  }
+
+  if (!["openai", "ark-multimodal"].includes(embeddingFormat)) {
+    embeddingConfigError = "Unsupported embedding format; use openai or ark-multimodal. Embedding has been disabled.";
+    embeddingEnabled = false;
   }
 
   // When provider="none", dimensions=0 signals VectorStore to skip vec0 table
@@ -707,6 +717,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       enabled: embeddingEnabled,
       provider: embeddingProvider,
       baseUrl: embeddingBaseUrl,
+      endpoint: embeddingEndpoint,
+      format: embeddingFormat as "openai" | "ark-multimodal",
       apiKey: embeddingApiKey,
       model: str(embeddingGroup, "model") ?? defaultModel,
       dimensions: num(embeddingGroup, "dimensions") ?? defaultDimensions,

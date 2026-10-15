@@ -15,7 +15,7 @@ cd AgentMemory
 2. 每个组件独立一份 Compose：先启动 `docker-compose.postgres.yaml`，再启动 `docker-compose.core.yaml`；可选模块按需启动。
 3. 先验证 `/health`、写入及查询，再按需配置 Panel、Proxy 和 LLM 提取。
 
-**Embedding API Key 填哪里？** 填根目录 `.env` 的 `MEMORY_EMBEDDING_API_KEY`。同处填写 `MEMORY_EMBEDDING_BASE_URL` 和 `MEMORY_EMBEDDING_MODEL`。`MemoryCore/tdai-gateway.postgres.yaml` 的 `memory.embedding` 引用这些变量，Compose 将其传入 Core。`dimensions` 默认 `1536`，必须改成模型实际输出维数。详细示例见 [安装指南](INSTALL_CN.md)。
+**Embedding API Key 填哪里？** 填根目录 `.env` 的 `MEMORY_EMBEDDING_API_KEY`。同处填写 `MEMORY_EMBEDDING_ENDPOINT`（完整请求地址，不追加路径）和 `MEMORY_EMBEDDING_MODEL`。火山 `/api/v3/embeddings/multimodal` 可直接填写，并设置 `MEMORY_EMBEDDING_FORMAT=ark-multimodal`。`MemoryCore/tdai-gateway.postgres.yaml` 的 `memory.embedding` 引用这些变量，Compose 将其传入 Core。`dimensions` 默认 `1536`，必须改成模型实际输出维数（火山示例为 `2048`）。旧 `BASE_URL` 保留为回退，完整 endpoint 优先。详细示例见 [安装指南](INSTALL_CN.md)。
 
 数据库密码只填根 `.env` 的 `POSTGRES_PASSWORD`，`config/db.toml` 通过 `password_env` 引用，自动编码；Embedding Key、Gateway Key、OAuth 加密密钥用途不同。ChatGPT OAuth 仅用于已授权的推理，不提供 Embedding API，也不会自动启用 Proxy 上游或 Knowledge Wiki 的 LLM。
 

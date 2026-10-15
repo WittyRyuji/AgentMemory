@@ -140,15 +140,7 @@ export function createStoreBundle(
       // ── Embedding service (only when enabled) ──
       let embeddingService: EmbeddingService | undefined;
       if (config.embedding.enabled && config.embedding.provider !== "local" && config.embedding.apiKey) {
-        embeddingService = createEmbeddingService({
-          provider: config.embedding.provider,
-          baseUrl: config.embedding.baseUrl,
-          apiKey: config.embedding.apiKey,
-          model: config.embedding.model,
-          dimensions: config.embedding.dimensions,
-          sendDimensions: config.embedding.sendDimensions,
-          maxInputChars: config.embedding.maxInputChars,
-        }, logger);
+        embeddingService = createEmbeddingService({ ...config.embedding }, logger);
       }
 
       // dimensions from config (0 when provider="none" → vec0 deferred)
@@ -178,9 +170,8 @@ export function createStoreBundle(
 /** PostgreSQL never downloads a local embedding model or falls back to local inference. */
 export function createPostgresEmbedding(config: MemoryTdaiConfig, logger?: StoreLogger): EmbeddingService {
   const emb = config.embedding;
-  if (!emb.enabled || ["local", "none"].includes(emb.provider) || !emb.apiKey || !emb.baseUrl || !emb.model || emb.dimensions < 1) {
+  if (!emb.enabled || ["local", "none"].includes(emb.provider) || !emb.apiKey || (!emb.endpoint && !emb.baseUrl) || !emb.model || emb.dimensions < 1) {
     throw new Error("PostgreSQL requires explicit remote API-key embedding configuration");
   }
-  return createEmbeddingService({ provider: emb.provider, apiKey: emb.apiKey, baseUrl: emb.baseUrl, model: emb.model,
-    dimensions: emb.dimensions, sendDimensions: emb.sendDimensions, maxInputChars: emb.maxInputChars }, logger);
+  return createEmbeddingService({ ...emb }, logger);
 }

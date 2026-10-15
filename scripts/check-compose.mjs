@@ -35,6 +35,14 @@ for (const component of ['postgres', 'core', 'panel', 'proxy', 'knowledge']) {
     assert(existsSync(new URL(`${context}/${dockerfile}`, root)));
   }
 }
+const core = load(readFileSync(new URL('docker-compose.core.yaml', root), 'utf8'));
+assert.equal(core.services.core.environment.MEMORY_EMBEDDING_ENDPOINT, '${MEMORY_EMBEDDING_ENDPOINT:-}');
+assert.equal(core.services.core.environment.MEMORY_EMBEDDING_BASE_URL, '${MEMORY_EMBEDDING_BASE_URL:-}');
+assert.equal(core.services.core.environment.MEMORY_EMBEDDING_FORMAT, '${MEMORY_EMBEDDING_FORMAT:-openai}');
+const gateway = load(readFileSync(new URL('MemoryCore/tdai-gateway.postgres.yaml', root), 'utf8'));
+assert.equal(gateway.memory.embedding.endpoint, '${MEMORY_EMBEDDING_ENDPOINT}');
+assert.equal(gateway.memory.embedding.format, '${MEMORY_EMBEDDING_FORMAT}');
+assert.equal(gateway.memory.embedding.baseUrl, '${MEMORY_EMBEDDING_BASE_URL}');
 const proxy = load(readFileSync(new URL('MemoryProxy/config.postgres.example.yaml', root), 'utf8'));
 assert.equal(proxy.storage.backend, 'postgres');
 assert.equal(proxy.auth.enabled, true);

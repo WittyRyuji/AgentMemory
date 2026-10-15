@@ -38,7 +38,7 @@ jobs:
           POSTGRES_VOLUME: compose-validation-only
           TDAI_GATEWAY_API_KEY: compose-validation-only
           TDAI_PROXY_ADMIN_API_KEY: compose-validation-only
-          MEMORY_EMBEDDING_BASE_URL: https://example.invalid/v1
+          MEMORY_EMBEDDING_ENDPOINT: https://example.invalid/custom/embeddings
           MEMORY_EMBEDDING_API_KEY: compose-validation-only
           MEMORY_EMBEDDING_MODEL: fixture
           KNOWLEDGE_SERVICE_KEY: compose-validation-only
@@ -66,7 +66,7 @@ jobs:
           npm run test:postgres
           npm run typecheck:oauth
           npm run test:oauth
-          npx vitest run src/db-config.test.ts src/core/store/tokenize.test.ts src/utils/checkpoint.test.ts src/core/checkpoint-startup.test.ts
+          npx vitest run src/core/store/embedding.test.ts src/db-config.test.ts src/core/store/tokenize.test.ts src/utils/checkpoint.test.ts src/core/checkpoint-startup.test.ts
           npm run build:plugin
       - name: Install Knowledge dependencies and native derived graph index
         if: matrix.module == 'MemoryKnowledge'

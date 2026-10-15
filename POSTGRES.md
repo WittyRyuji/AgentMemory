@@ -35,8 +35,22 @@ exact path resolution, compatibility, conflict handling and container mounts.
 The private file is gitignored; no actual credentials are included in this branch.
 
 Use `MemoryCore/tdai-gateway.postgres.yaml` for the existing gateway settings.
-Configure the external embedding URL, API key, model and real dimensions there
-or through the shown environment variables. The TOML URL selects PostgreSQL and
+Configure `memory.embedding.endpoint` (or root `.env` `MEMORY_EMBEDDING_ENDPOINT`)
+with the complete request URL; it is used unchanged, including custom paths and
+query strings. Set the API key, model and real dimensions alongside it. The
+optional legacy `baseUrl` / `MEMORY_EMBEDDING_BASE_URL` still appends `/embeddings`
+only when no endpoint is set; endpoint wins when both are present.
+`format` / `MEMORY_EMBEDDING_FORMAT` defaults to `openai`. For
+`https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal`, use
+`ark-multimodal`: each text is sent separately as `input: [{type: "text", text: ...}]`
+and read from `data.embedding`. For example, `doubao-embedding-vision-250615`
+outputs 2048 dimensions by default; set YAML `dimensions: 2048` with
+`sendDimensions: false`, or explicitly request a supported dimension. Writes and
+recall share this configuration. Changing models/formats or dimensions requires
+re-embedding existing vectors; do not mix embedding spaces. See the
+[official Ark guide](https://docs.volcengine.com/docs/ark/vectorization?lang=zh).
+Returned vector counts, dimensions and numeric values are checked before use;
+HTTP errors omit provider response bodies to keep keys and memory text out of logs. The TOML URL selects PostgreSQL and
 sets PG-compatible default storage modes. Old module-specific URL variables and
 `DATABASE_URL` remain supported when the default file is absent. With a file,
 conflicting legacy values fail instead of silently selecting another database.

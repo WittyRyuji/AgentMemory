@@ -21,7 +21,9 @@ memory:
   embedding:
     enabled: true
     provider: openai
-    baseUrl: "${MEMORY_EMBEDDING_BASE_URL}"
+    endpoint: "${MEMORY_EMBEDDING_ENDPOINT}" # Complete URL, no suffix appended.
+    format: "${MEMORY_EMBEDDING_FORMAT}" # openai or ark-multimodal
+    baseUrl: "${MEMORY_EMBEDDING_BASE_URL}" # Legacy fallback only; endpoint wins.
     apiKey: "${MEMORY_EMBEDDING_API_KEY}"
     model: "${MEMORY_EMBEDDING_MODEL}"
     dimensions: 1536 # Set to the provider's real output dimension before startup.

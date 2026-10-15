@@ -44,12 +44,26 @@ POSTGRES_VOLUME=agentmemory-postgres
 AGENTMEMORY_NETWORK=agentmemory
 TDAI_GATEWAY_API_KEY=REPLACE_WITH_A_LONG_RANDOM_GATEWAY_KEY
 TDAI_INSTANCE_ID=default
-MEMORY_EMBEDDING_BASE_URL=https://embedding.example.com/v1
+MEMORY_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings
+MEMORY_EMBEDDING_FORMAT=openai
 MEMORY_EMBEDDING_API_KEY=REPLACE_WITH_EMBEDDING_PROVIDER_KEY
-MEMORY_EMBEDDING_MODEL=REPLACE_WITH_EMBEDDING_MODEL_ID
+MEMORY_EMBEDDING_MODEL=text-embedding-3-small
 ```
 
-`embedding.example.com` 是占位地址，必须替换成提供商的真实 API 根地址。代码自动追加 `/embeddings`，不要把完整 `/v1/embeddings` 路径放在 `BASE_URL` 中。模型名必须是该服务支持的 Embedding 模型，不是聊天模型。
+`MEMORY_EMBEDDING_ENDPOINT` 直接填写完整请求地址，代码原样使用，不追加路径。上面以 OpenAI 为例，其他提供商可直接填自己的路径。`MEMORY_EMBEDDING_FORMAT` 选择请求/响应格式，默认 `openai`。
+
+火山方舟多模态接口使用以下配置（这里仅对记忆文本向量化）：
+
+```dotenv
+MEMORY_EMBEDDING_ENDPOINT=https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal
+MEMORY_EMBEDDING_FORMAT=ark-multimodal
+MEMORY_EMBEDDING_API_KEY=REPLACE_WITH_ARK_API_KEY
+MEMORY_EMBEDDING_MODEL=doubao-embedding-vision-250615
+```
+
+此模型示例需将下方 YAML 的 `dimensions` 改成 `2048`（默认输出维数）；如启用服务端支持的降维，再同步修改维数和 `sendDimensions`。Ark 的 `input` 是内容对象数组、结果是 `data.embedding`，因此每条记忆单独请求，避免把多条文本合成一个向量。协议参考 [方舟多模态向量化](https://docs.volcengine.com/docs/ark/vectorization?lang=zh)。
+
+旧配置 `baseUrl` / `MEMORY_EMBEDDING_BASE_URL` 仍可使用：仅在 `endpoint` 为空时追加 `/embeddings`；同时设置时完整 `endpoint` 优先。两者至少填一项。
 
 ```sh
 chmod 600 .env
@@ -62,7 +76,9 @@ memory:
   embedding:
     enabled: true
     provider: openai
-    baseUrl: "${MEMORY_EMBEDDING_BASE_URL}"
+    endpoint: "${MEMORY_EMBEDDING_ENDPOINT}"
+    format: "${MEMORY_EMBEDDING_FORMAT}"
+    baseUrl: "${MEMORY_EMBEDDING_BASE_URL}" # 仅兼容旧配置，endpoint 优先
     apiKey: "${MEMORY_EMBEDDING_API_KEY}"
     model: "${MEMORY_EMBEDDING_MODEL}"
     dimensions: 1536

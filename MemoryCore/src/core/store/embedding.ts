@@ -1,8 +1,8 @@
 /**
  * Embedding Service: converts text to vector embeddings.
  *
- * Supports two providers:
- * - "openai": OpenAI-compatible embedding APIs (OpenAI, Azure OpenAI, self-hosted)
+ * Supports remote OpenAI/Ark wire formats and a local provider:
+ * - Remote: complete endpoints with OpenAI-compatible or Ark multimodal text requests
  * - "local": node-llama-cpp with embeddinggemma-300m GGUF model (fully offline)
  *
  * When no remote embedding is configured, automatically falls back to local provider.
@@ -22,8 +22,12 @@ import type { Logger } from "../types.js";
 export interface OpenAIEmbeddingConfig {
   /** Provider identifier — any value other than "local" (e.g. "openai", "deepseek", "azure", "qclaw") */
   provider: string;
-  /** API base URL (required — must be specified by user, e.g. "https://api.openai.com/v1") */
-  baseUrl: string;
+  /** Legacy API root; /embeddings is appended only when endpoint is absent. */
+  baseUrl?: string;
+  /** Complete request URL; takes precedence over baseUrl and is used unchanged. */
+  endpoint?: string;
+  /** Wire format; Ark multimodal embeds each memory text in a separate request. */
+  format?: "openai" | "ark-multimodal";
   /** API Key (required) */
   apiKey: string;
   /** Model name (required — must be specified by user) */
@@ -391,7 +395,7 @@ export class LocalEmbeddingService implements EmbeddingService {
 /** Max texts per batch (OpenAI limit is 2048, we use a safe value) */
 const MAX_BATCH_SIZE = 256;
 
-/** Max retries for API calls */
+/** Preserve fail-fast behavior; callers own retries and latency budgets. */
 const MAX_RETRIES = 0;
 /** Default timeout per API call in milliseconds */
 const DEFAULT_API_TIMEOUT_MS = 10_000;
@@ -414,19 +418,9 @@ class EmbeddingApiError extends Error {
   }
 }
 
-interface OpenAIEmbeddingResponse {
-  data: Array<{
-    index: number;
-    embedding: number[];
-  }>;
-  usage?: {
-    prompt_tokens: number;
-    total_tokens: number;
-  };
-}
-
 export class OpenAIEmbeddingService implements EmbeddingService {
-  private readonly baseUrl: string;
+  private readonly endpoint: string;
+  private readonly format: "openai" | "ark-multimodal";
   private readonly apiKey: string;
   private readonly model: string;
   private readonly dims: number;
@@ -441,16 +435,26 @@ export class OpenAIEmbeddingService implements EmbeddingService {
     if (!config.apiKey) {
       throw new Error("EmbeddingService: apiKey is required for remote provider");
     }
-    if (!config.baseUrl) {
-      throw new Error("EmbeddingService: baseUrl is required for remote provider");
+    if (!config.endpoint && !config.baseUrl) {
+      throw new Error("EmbeddingService: endpoint or baseUrl is required for remote provider");
     }
     if (!config.model) {
       throw new Error("EmbeddingService: model is required for remote provider");
     }
-    if (!config.dimensions || config.dimensions <= 0) {
+    if (!Number.isInteger(config.dimensions) || config.dimensions <= 0) {
       throw new Error("EmbeddingService: dimensions is required for remote provider (must be a positive integer)");
     }
-    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.endpoint = config.endpoint || `${config.baseUrl!.replace(/\/+$/, "")}/embeddings`;
+    // Validate without rewriting paths, query strings, or trailing slashes.
+    let url: URL;
+    try { url = new URL(this.endpoint); } catch { throw new Error("EmbeddingService: invalid endpoint URL"); }
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.hash) {
+      throw new Error("EmbeddingService: endpoint must be an HTTP(S) URL without userinfo or fragment");
+    }
+    this.format = config.format ?? "openai";
+    if (!["openai", "ark-multimodal"].includes(this.format)) {
+      throw new Error("EmbeddingService: unsupported format (use openai or ark-multimodal)");
+    }
     this.apiKey = config.apiKey;
     this.model = config.model;
     this.dims = config.dimensions;
@@ -467,7 +471,7 @@ export class OpenAIEmbeddingService implements EmbeddingService {
   }
 
   getProviderInfo(): EmbeddingProviderInfo {
-    return { provider: this.providerName, model: this.model };
+    return { provider: this.format === "openai" ? this.providerName : `${this.providerName}:${this.format}`, model: this.model };
   }
 
   /** Remote embedding is always ready (stateless HTTP). */
@@ -492,6 +496,14 @@ export class OpenAIEmbeddingService implements EmbeddingService {
     const processedTexts = this.maxInputChars
       ? texts.map((t) => this.truncateInput(t))
       : texts;
+
+    // Ark's input array describes one combined sample, not independent records.
+    // Sequential calls also bound concurrency and preserve order.
+    if (this.format === "ark-multimodal") {
+      const results: Float32Array[] = [];
+      for (const text of processedTexts) results.push(...await this._callApi([text], options?.timeoutMs));
+      return results;
+    }
 
     // Split into sub-batches if needed
     if (processedTexts.length > MAX_BATCH_SIZE) {
@@ -521,24 +533,25 @@ export class OpenAIEmbeddingService implements EmbeddingService {
 
   private async _callApi(texts: string[], timeoutOverride?: number): Promise<Float32Array[]> {
     const body: Record<string, unknown> = {
-      input: texts,
+      input: this.format === "ark-multimodal" ? [{ type: "text", text: texts[0] }] : texts,
       model: this.model,
     };
+    if (this.format === "ark-multimodal") body.encoding_format = "float";
     if (this.sendDimensions) {
       body.dimensions = this.dims;
     }
 
     // Determine fetch URL and headers based on proxy mode
     const useProxy = this.providerName === "qclaw" && !!this.proxyUrl;
-    const fetchUrl = useProxy ? this.proxyUrl! : `${this.baseUrl}/embeddings`;
+    const fetchUrl = useProxy ? this.proxyUrl! : this.endpoint;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${this.apiKey}`,
     };
     if (useProxy) {
-      headers["Remote-URL"] = `${this.baseUrl}/embeddings`;
+      headers["Remote-URL"] = this.endpoint;
       this.logger?.debug?.(
-        `${TAG} [qclaw-proxy] Forwarding embedding request via proxy: ${fetchUrl}, Remote-URL: ${headers["Remote-URL"]}`,
+        `${TAG} [qclaw-proxy] Forwarding embedding request via configured proxy`,
       );
     }
 
@@ -558,28 +571,40 @@ export class OpenAIEmbeddingService implements EmbeddingService {
           });
 
           if (!resp.ok) {
-            const errBody = await resp.text().catch(() => "(unable to read body)");
-            const err = new EmbeddingApiError(
-              `Embedding API error: HTTP ${resp.status} ${resp.statusText} — ${errBody.slice(0, 500)}`,
-              resp.status,
-            );
-            // Don't retry on 4xx client errors (except 429 rate limit)
-            if (resp.status >= 400 && resp.status < 500 && resp.status !== 429) {
-              throw err;
+            // Provider bodies can echo input text, keys, or signed URLs. Never log them.
+            throw new EmbeddingApiError(`Embedding API error: HTTP ${resp.status}`, resp.status);
+          }
+
+          let json: unknown;
+          try { json = await resp.json(); } catch {
+            throw new EmbeddingApiError("Embedding API returned invalid JSON", 422);
+          }
+          const data = (json as { data?: unknown } | null)?.data;
+          let vectors: unknown[];
+          if (this.format === "ark-multimodal") {
+            if (!data || typeof data !== "object" || Array.isArray(data)) {
+              throw new EmbeddingApiError("Embedding API expected Ark data.embedding object", 422);
             }
-            lastError = err;
-            continue;
+            vectors = [(data as { embedding?: unknown }).embedding];
+          } else {
+            if (!Array.isArray(data) || data.length !== texts.length) {
+              throw new EmbeddingApiError("Embedding API returned incorrect vector count", 422);
+            }
+            const sorted = [...data].sort((a, b) => a?.index - b?.index);
+            if (sorted.some((entry, index) => !entry || entry.index !== index)) {
+              throw new EmbeddingApiError("Embedding API returned invalid vector indices", 422);
+            }
+            vectors = sorted.map(entry => entry.embedding);
           }
-
-          const json = (await resp.json()) as OpenAIEmbeddingResponse;
-
-          if (!json.data || !Array.isArray(json.data)) {
-            throw new Error("Embedding API returned unexpected format: missing 'data' array");
-          }
-
-          // Sort by index to ensure correct order, then sanitize+normalize for consistency with local provider
-          const sorted = [...json.data].sort((a, b) => a.index - b.index);
-          return sorted.map((d) => sanitizeAndNormalize(d.embedding));
+          return vectors.map(vector => {
+            if (!Array.isArray(vector) || vector.length !== this.dims) {
+              throw new EmbeddingApiError(`Embedding API dimension mismatch: expected ${this.dims}`, 422);
+            }
+            if (!vector.every(value => typeof value === "number" && Number.isFinite(value) && Number.isFinite(Math.fround(value)))) {
+              throw new EmbeddingApiError("Embedding API returned invalid vector values", 422);
+            }
+            return sanitizeAndNormalize(vector);
+          });
         } finally {
           clearTimeout(timeoutId);
         }
@@ -588,7 +613,9 @@ export class OpenAIEmbeddingService implements EmbeddingService {
         if (err instanceof EmbeddingApiError && err.isClientError()) {
           throw err;
         }
-        lastError = err instanceof Error ? err : new Error(String(err));
+        lastError = err instanceof EmbeddingApiError ? err : new Error(
+          err instanceof Error && err.name === "AbortError" ? "Embedding API request timed out" : "Embedding API request failed",
+        );
         // AbortError = timeout, retry
         if (attempt < MAX_RETRIES) {
           // Exponential backoff: 500ms, 1000ms

@@ -192,3 +192,31 @@ it("concurrent first requests wait for the PostgreSQL schema to be ready", async
     expect(await store.countProfiles?.()).toBe(0);
   }));
 });
+
+it("endpoint-only Ark configuration is shared by L1 writes and vector recall", async () => {
+  const endpoint = "https://ark.invalid/api/v3/embeddings/multimodal?version=test";
+  const memoryCfg = { ...cfg.memory, embedding: { ...cfg.memory.embedding,
+    baseUrl: "", endpoint, format: "ark-multimodal" as const, sendDimensions: false,
+  } };
+  const fetchMock = vi.fn().mockImplementation(async () => Response.json({ data: { embedding: [1, 0, 0] } }));
+  vi.stubGlobal("fetch", fetchMock);
+  const arkPool = new StorePool({ mode: "postgres", memoryCfg, dataDir: dir, logger });
+  (arkPool as any).graceCloseDelayMs = 0;
+  try {
+    const { store, embedding } = await arkPool.getStore("ark-endpoint", null);
+    expect(embedding.getDimensions()).toBe(3);
+    const now = new Date().toISOString();
+    await store.upsertL1({ id: "ark-l1", content: "synthetic memory", type: "persona", priority: 80,
+      scene_name: "test", sessionKey: "session", sessionId: "session", teamId: "team", agentId: "agent",
+      userId: "user", timestamps: [now], createdAt: now, updatedAt: now, version: 1, metadata: {},
+    }, await embedding.embed("synthetic memory"));
+    const recalled = await store.searchL1Vector(await embedding.embed("synthetic query"), 5, undefined, { teamId: "team" });
+    expect(recalled[0].record_id).toBe("ark-l1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([endpoint, endpoint]);
+    expect(fetchMock.mock.calls.map(call => JSON.parse(call[1].body))).toEqual(
+      ["synthetic memory", "synthetic query"].map(text => ({ model: "test", encoding_format: "float", input: [{ type: "text", text }] })),
+    );
+    expect(createPostgresEmbedding(memoryCfg).getProviderInfo()).toEqual(embedding.getProviderInfo());
+  } finally { await arkPool.closeAll(); }
+});
