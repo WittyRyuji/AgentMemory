@@ -1,3 +1,7 @@
+# 共享数据库配置（当前 main）
+
+中文安装步骤及 Embedding Key 示例见 [安装指南](../INSTALL_CN.md)。这里只存数据库 URL；Embedding 配置在 `MemoryCore/tdai-gateway.postgres.yaml`，密钥在运行时环境。根 Compose 只启动 Core / 可选 Knowledge，不含 Panel / Proxy。
+
 # Database configuration
 
 All four services and their PostgreSQL migration commands read **`config/db.toml`**.

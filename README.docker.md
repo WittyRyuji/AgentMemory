@@ -1,3 +1,5 @@
+> **历史 / 上游部署参考**：本文保留旧镜像、存储与客户端接入说明。当前 `main` 的 PostgreSQL + pgvector、Embedding 与独立 OAuth 安装请先阅读 [当前安装指南](INSTALL_CN.md) 和 [项目 README](README.md)。旧公共镜像不保证包含本分支改动。
+
 # TencentDB-Agent-Memory
 
 AI Agent 长期记忆服务，为任意 Agent 框架提供四层渐进式记忆能力（L0 对话 → L1 原子记忆 → L2 场景归纳 → L3 用户画像）。

@@ -1,4 +1,4 @@
-# PostgreSQL migration (development branch)
+# PostgreSQL storage and migration (current main)
 
 This is an in-place backend migration of TencentDB Agent Memory. The existing gateway, Panel/SDK API shapes, metadata services and team/agent ACLs are retained. It does not replace the product with a separate memory server.
 
@@ -19,6 +19,8 @@ Each Core instance has separate hashed memory/metadata schemas. PostgreSQL has a
 The CodeGraph vendor engine still builds a local SQLite search index. This is a derived cache rebuilt from PG-backed source files, not authoritative business storage. Git checkouts, tool working directories, temporary files, server logs and configuration remain on disk. Knowledge currently enforces one active writer per database because upstream engines mutate working directories. Optional external observability sinks (including ClickHouse) are unchanged.
 
 Panel retains its signing/encryption secret and instance registry as configuration files. Keep the existing secret unchanged during migration. Login sessions/nonces and callback/progress registries remain ephemeral; this does not provide restart-persistent login or multi-replica IdP sessions. Optional private Proxy cost-guard/request-preparation extensions retain opaque Redis contracts outside this public migration. Direct import of legacy Redis/COS state is not implemented; export/reconcile it before cutover, as described in the Proxy guide.
+
+中文安装步骤、Embedding Key 和启动命令见 [当前安装指南](INSTALL_CN.md)。
 
 ## Runtime configuration
 
@@ -73,13 +75,12 @@ Known exclusions: drained in-memory/Redis pipeline work has no SQLite representa
 
 ## Verification evidence
 
-Locally run against PostgreSQL WASM (PGlite), not a mocked SQL engine:
+Baseline: `3f8aee8` on `main`, checked on 2026-10-14. The four-module GitHub PostgreSQL CI completed with 297 passing tests. A separate native PostgreSQL 17.11 + pgvector 0.8.0 run passed 253 tests: Core PG 124, Core OAuth 46, Knowledge 34, Panel 21, Proxy 28, with no skips in that selected run. Counts differ because CI includes additional Core configuration/tokenization/checkpoint suites.
 
-- Core PG suites: 124 tests including 94 unchanged metadata contract cases, 12 unchanged storage contract cases, pgvector/Chinese search, profiles, queues/locks, migration rollback and per-instance gateway wiring.
-- Actual gateway startup/shutdown is tested with only the HTTP listener stubbed; storage, metadata, state, skills and scanner/worker assembly execute normally. This does not establish TCP reachability or native PostgreSQL pooling.
-- Core focused `npm run typecheck:postgres` and plugin `npm run build:plugin` pass.
-- Full upstream gateway strict type-check is not clean: the untouched upstream and this fork showed the same 197 diagnostics with the same installed dependency set (normalized file paths/line positions), including absent private integrations and existing generated-schema/SDK typing issues.
-- Knowledge: 18 tests pass, one native-session lease test is skipped without `PG_TEST_URL`; type-check/build and real native CodeGraph indexing/cache reconstruction pass.
-- Panel: full type-check and 6 tests pass. Proxy: full type-check and 12 tests pass, including native SQLite import fixtures in isolated processes.
+The separate actual Core HTTP smoke verified `/health`, `/capture`, `/search/conversations`, hybrid `/search/memories`, and retrieval after both Gateway and PostgreSQL restart. Production-adapter checks also covered vector / full-text search, L2 profiles, object bytes, buffers, queued tasks and tenant isolation. Embeddings came from a synthetic local fixture, not an external provider; this verifies wiring and persistence, not embedding or extraction quality.
 
-`.github/workflows/postgres.yml` runs all four modules against a native PostgreSQL 17 + pgvector service. Set `PG_TEST_URL` locally only to a disposable database ending in `_test`; tests drop their test schemas. Do not use production data. Native network, pooling and lease behavior are not considered verified until that CI run succeeds. Docker startup and live external-provider/LLM calls have not been run in this workspace.
+Panel, Proxy and Knowledge passed native database contracts/integration suites; their independent HTTP entrypoints and full restart flows were not exercised in that smoke. OAuth CLI callback/state/Host checks ran locally, while provider/JWKS/SSE tests used fixtures. Real account authorization, registration, model entitlement and inference remain unverified; the test browser could not reach the shell's loopback callback.
+
+Core focused PostgreSQL/OAuth type checks and plugin build passed. The full upstream gateway strict type check is not clean: the upstream and this fork showed the same 197 diagnostics with the same dependency set, including absent private integrations and existing generated-schema/SDK typing issues. Do not interpret the focused CI as a clean full-project strict type check.
+
+[The PostgreSQL workflow](.github/workflows/postgres.yml) runs native PostgreSQL 17 + pgvector. Set `PG_TEST_URL` only to a disposable database ending in `_test`; tests create/drop test schemas. Without it, relevant tests use PGlite and native-only cases may skip. Docker Compose deployment, production migration, external Embedding, live OAuth/LLM calls and load/quality benchmarks still require operator validation.

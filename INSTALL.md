@@ -1,3 +1,5 @@
+> **历史 / 上游部署参考**：本文保留旧镜像、存储与客户端接入说明。当前 `main` 的 PostgreSQL + pgvector、Embedding 与独立 OAuth 安装请先阅读 [当前安装指南](INSTALL_CN.md) 和 [项目 README](README.md)。旧公共镜像不保证包含本分支改动。
+
 # TencentDB Agent Memory — Installation Guide
 
 ← Back to [README.md](./README.md) · 简体中文: [INSTALL_CN.md](./INSTALL_CN.md)

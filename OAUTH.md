@@ -1,4 +1,6 @@
-# Independent OAuth inference
+# 独立 OAuth 推理（当前 main）
+
+先完成 [中文安装指南](INSTALL_CN.md) 的数据库和 Embedding 配置。Embedding Key 填根 `.env` 的 `MEMORY_EMBEDDING_API_KEY`，OAuth 不提供 Embedding。以下为独立授权的详细配置及安全约束。
 
 AgentMemory now has its own OAuth login and inference path. It does not read
 Hermes, Codex, OpenClaw, browser, or other applications' saved credentials. It
@@ -6,7 +8,7 @@ also does not require a host agent to run extraction.
 
 The first implementation is OpenAI Sign in with ChatGPT (SIWC) for an owner's
 self-hosted open-source installation. The owner must approve AgentMemory's own
-registration, ChatGPT plan permissions, and usage limits. This branch implements
+registration, ChatGPT plan permissions, and usage limits. Current main implements
 and tests the code; no real account has been signed in, registered, billed, or
 deployed during development. Account/workspace eligibility and actual model
 availability still need an owner-authorized live check.
