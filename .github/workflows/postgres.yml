@@ -99,3 +99,5 @@ jobs:
       - name: Check single-container deployment invariants
         if: matrix.module == 'MemoryProxy'
         run: node scripts/check-compose.mjs
+      - name: Verify secret references with synthetic values
+        run: node scripts/check-db-env.mjs ${{ matrix.module }}

@@ -16,7 +16,8 @@ availability still need an owner-authorized live check.
 ## Configuration and first login
 
 1. At the repository root, copy `config/db.example.toml` to **`config/db.toml`**,
-   enter the PostgreSQL URL, and restrict the file to the service owner (`0600`).
+   set the password-free PostgreSQL URL and `password_env` reference. Put the raw
+   password only in root `.env` (`POSTGRES_PASSWORD`); restrict both files to the service owner (`0600`).
    All four modules use this shared file. See [database configuration](config/README.md).
 2. Provision `AGENTMEMORY_OAUTH_KEY` through the runtime's secret manager: a
    cryptographically random 32-byte key encoded as canonical base64. It is the
@@ -28,9 +29,9 @@ availability still need an owner-authorized live check.
 
    ```sh
    cd MemoryCore
-   npm run oauth -- login --account owner --vault-id agentmemory
-   npm run oauth -- status --account owner --vault-id agentmemory
-   npm run oauth -- models --account owner --vault-id agentmemory
+   node --env-file=../.env --import tsx scripts/oauth/cli.ts login --account owner --vault-id agentmemory
+   node --env-file=../.env --import tsx scripts/oauth/cli.ts status --account owner --vault-id agentmemory
+   node --env-file=../.env --import tsx scripts/oauth/cli.ts models --account owner --vault-id agentmemory
    ```
 
    The CLI binds an available `127.0.0.1` port before printing a one-time sign-in
@@ -91,7 +92,7 @@ configuration instructions, not evidence of deployment.
   vault. Do not expose the callback on `0.0.0.0`, copy browser credentials, or
   borrow another tool's session. Secure credential-file import/export is not
   implemented.
-- `npm run oauth -- logout --account owner --vault-id agentmemory` attempts
+- `node --env-file=../.env --import tsx scripts/oauth/cli.ts logout --account owner --vault-id agentmemory` attempts
   provider revocation, clears local tokens and pending login, and retains the
   registration/host mapping. If revocation cannot be confirmed, the CLI says so;
   disconnect the application in ChatGPT Settings. Already in-flight inference

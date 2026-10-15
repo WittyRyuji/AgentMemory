@@ -1,15 +1,13 @@
-# Copy to config/db.toml (gitignored). Protect with chmod 600.
-# Shared by Core, Knowledge, Panel and Proxy. Percent-encode URL passwords.
+# Copy to config/db.toml (gitignored). No password is stored in this file.
+# For native processes change postgres to the actual reachable database host.
 [postgres]
-url = "postgresql://agentmemory:CHANGE_ME@127.0.0.1:5432/agentmemory"
+url = "postgresql://agentmemory@postgres:5432/agentmemory"
+password_env = "POSTGRES_PASSWORD"
 
-# Optional per-module overrides; omit to use [postgres].url.
-# [core]
-# url = "postgresql://.../core"
-# metadata_url = "postgresql://.../metadata"
-# [knowledge]
-# url = "postgresql://.../knowledge"
+# Optional complete URL from the process environment instead (do not combine
+# url_env with url/password_env in the same section):
 # [panel]
-# url = "postgresql://.../panel"
-# [proxy]
-# url = "postgresql://.../proxy"
+# url_env = "PANEL_DATABASE_URL"
+# [core]
+# metadata_url_env = "CORE_METADATA_DATABASE_URL"
+# Module overrides replace the shared URL AND its password reference.

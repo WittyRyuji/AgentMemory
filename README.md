@@ -17,7 +17,7 @@ cd AgentMemory
 
 **Embedding API Key 填哪里？** 填根目录 `.env` 的 `MEMORY_EMBEDDING_API_KEY`。同处填写 `MEMORY_EMBEDDING_BASE_URL` 和 `MEMORY_EMBEDDING_MODEL`。`MemoryCore/tdai-gateway.postgres.yaml` 的 `memory.embedding` 引用这些变量，Compose 将其传入 Core。`dimensions` 默认 `1536`，必须改成模型实际输出维数。详细示例见 [安装指南](INSTALL_CN.md)。
 
-数据库凭证在 `config/db.toml`；Embedding Key、Gateway Key、OAuth 加密密钥用途不同。ChatGPT OAuth 仅用于已授权的推理，不提供 Embedding API，也不会自动启用 Proxy 上游或 Knowledge Wiki 的 LLM。
+数据库密码只填根 `.env` 的 `POSTGRES_PASSWORD`，`config/db.toml` 通过 `password_env` 引用，自动编码；Embedding Key、Gateway Key、OAuth 加密密钥用途不同。ChatGPT OAuth 仅用于已授权的推理，不提供 Embedding API，也不会自动启用 Proxy 上游或 Knowledge Wiki 的 LLM。
 
 ## 四个模块
 

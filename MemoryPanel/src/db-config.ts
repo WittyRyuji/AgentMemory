@@ -69,6 +69,33 @@ function url(value: unknown): string | undefined {
   return value;
 }
 
+// Explicit references only: never interpolate or evaluate shell expressions.
+function envValue(name: unknown, env: NodeJS.ProcessEnv): string {
+  if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+    throw new Error("Invalid database environment reference (value redacted)");
+  const value = env[name];
+  if (typeof value !== "string" || !value.trim())
+    throw new Error("Required database environment reference is missing or empty (value redacted)");
+  return value;
+}
+function sectionUrl(section: Record<string, unknown>, env: NodeJS.ProcessEnv): string | undefined {
+  if (section.url_env !== undefined) return url(envValue(section.url_env, env));
+  const base = url(section.url);
+  if (section.password_env === undefined) return base;
+  if (!base) throw new Error("Database password_env requires a URL (value redacted)");
+  const parsed = new URL(base);
+  if (parsed.password || !parsed.username)
+    throw new Error("Database password_env requires a URL with username and no password (value redacted)");
+  // Encode exactly once, including percent signs, slashes and Unicode.
+  const password = envValue(section.password_env, env);
+  try {
+    parsed.password = encodeURIComponent(password);
+  } catch {
+    throw new Error("Invalid database password encoding (value redacted)");
+  }
+  return url(parsed.href);
+}
+
 /** TOML is authoritative. Conflicting legacy URL values fail unless the operator explicitly
  * sets AGENTMEMORY_DB_OVERRIDE=env. Missing optional default file retains legacy behavior.
  * No ancestor walk: use CWD/config/db.toml, or repo/config/db.toml from a module directory.
@@ -99,17 +126,31 @@ export function loadDatabaseConfig(
         throw new Error("Unknown database configuration section");
       const section = table(document[key]);
       for (const field of Object.keys(section)) {
-        if (field !== "url" && !(key === "core" && field === "metadata_url"))
+        if (!["url", "url_env", "password_env"].includes(field) &&
+            !(key === "core" && ["metadata_url", "metadata_url_env"].includes(field)))
           throw new Error("Unknown database configuration field");
-        url(section[field]);
+        if (field.endsWith("_env")) {
+          if (typeof section[field] !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(section[field] as string))
+            throw new Error("Invalid database environment reference (value redacted)");
+        } else url(section[field]);
       }
+      if ((section.url_env !== undefined && (section.url !== undefined || section.password_env !== undefined)) ||
+          (section.metadata_url_env !== undefined && section.metadata_url !== undefined) ||
+          (section.password_env !== undefined && section.url === undefined))
+        throw new Error("Conflicting database configuration fields (values redacted)");
     }
   }
   const shared = document?.postgres ? table(document.postgres) : {};
   const specific = document?.[module] ? table(document[module]) : {};
-  const configured = url(specific.url ?? shared.url);
+  const configured = sectionUrl(
+    specific.url !== undefined || specific.url_env !== undefined ? specific : shared, env,
+  );
   const metadata =
-    module === "core" ? (url(specific.metadata_url) ?? configured) : undefined;
+    module === "core"
+      ? (specific.metadata_url_env !== undefined
+          ? url(envValue(specific.metadata_url_env, env))
+          : url(specific.metadata_url)) ?? configured
+      : undefined;
   const override = env.AGENTMEMORY_DB_OVERRIDE;
   if (override && override !== "env")
     throw new Error("AGENTMEMORY_DB_OVERRIDE must be env or unset");

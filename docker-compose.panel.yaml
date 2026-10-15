@@ -14,6 +14,7 @@ services:
       HOST: 0.0.0.0
       PORT: '8123'
       PANEL_STATE_BACKEND: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a PostgreSQL password outside Git}
       AGENTMEMORY_DB_CONFIG: /app/config/db.toml
       METADATA_INSTANCES_CONFIG: /app/config/metadata-instances.json
       PANEL_AUTH_MODE: user_key

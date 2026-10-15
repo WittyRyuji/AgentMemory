@@ -14,6 +14,7 @@ git clone --branch main --single-branch https://github.com/WittyRyuji/AgentMemor
 cd AgentMemory
 umask 077
 cp config/db.example.toml config/db.toml
+cp .env.example .env
 chmod 600 config/db.toml
 ```
 
@@ -25,19 +26,20 @@ chmod 600 config/db.toml
 
 ```toml
 [postgres]
-url = "postgresql://agentmemory:REPLACE_WITH_DB_PASSWORD@postgres:5432/agentmemory"
+url = "postgresql://agentmemory@postgres:5432/agentmemory"
+password_env = "POSTGRES_PASSWORD"
 ```
 
-下面 `.env` 的 `POSTGRES_PASSWORD` 必须与 URL 中的密码一致。URL 密码含 `@`、`:`、`/` 等保留字符时需百分号编码；`.env` 中仍写原始密码。TOML **不支持** `${VARIABLE}` 展开。原生运行使用数据库实际可达的地址，例如 `127.0.0.1:5432`。
+密码只在根 `.env` 的 `POSTGRES_PASSWORD` 填一次，TOML 仅保存变量名；加载器读取进程环境并自动百分号编码原始密码，无需手工拼 DSN。变量缺失或为空会拒绝启动。`password_env` 是显式引用，不执行 shell 或通用 `${VARIABLE}` 展开。原生运行把 URL 主机改成数据库实际可达的地址，例如 `127.0.0.1:5432`。
 
 四模块共同读取此文件；可用 `[core]`、`[knowledge]`、`[panel]`、`[proxy]` 的 `url` 分别覆盖。移除旧的冲突数据库环境变量和显式非 PG 后端设置，否则启动会拒绝。详见 [路径、优先级、TLS 与挂载规则](config/README.md)。
 
 ## 配置 Embedding
 
-在**仓库根目录**新建 `.env`，复制下面占位模板并在本机填写真实值：
+编辑刚复制的**仓库根目录** `.env`，在本机填写真实值；核心字段如下：
 
 ```dotenv
-POSTGRES_PASSWORD=REPLACE_WITH_DB_PASSWORD
+POSTGRES_PASSWORD='REPLACE_WITH_DB_PASSWORD'
 POSTGRES_VOLUME=agentmemory-postgres
 AGENTMEMORY_NETWORK=agentmemory
 TDAI_GATEWAY_API_KEY=REPLACE_WITH_A_LONG_RANDOM_GATEWAY_KEY
@@ -73,13 +75,14 @@ memory:
 
 | 配置 | 用途 |
 | --- | --- |
-| `config/db.toml` | PostgreSQL 连接凭证 |
+| `config/db.toml` | 数据库地址和环境变量名，不保存密码 |
+| `.env` 的 `POSTGRES_PASSWORD` | PostgreSQL 原始密码，服务器和四模块共用 |
 | `MEMORY_EMBEDDING_API_KEY` | 文本转向量 API；与 OAuth 独立 |
 | `TDAI_GATEWAY_API_KEY` | 服务间访问 Core 的 Bearer 密钥 |
 | `user_key` | Panel / Agent 用户身份，由 Core 创建 |
 | `AGENTMEMORY_OAUTH_KEY` | OAuth vault 加密密钥，不是 API Key |
 
-`.env` 和 `config/db.toml` 已被 Git 忽略；不要提交、截图、粘贴日志或把它们打包进镜像。不要把真值直接写入受版本管理的 YAML。含 `$` 等字符的 `.env` 值需遵循 Compose 的引号 / 插值规则；不要 `source` 不可信文件。避免将展开后的 `docker compose config` 输出分享给别人，其中可能包含密钥。
+`.env` 和 `config/db.toml` 已被 Git 忽略；不要提交、截图、粘贴日志或把它们打包进镜像。不要把真值直接写入受版本管理的 YAML。含 `$`、`#` 等字符的原始密码建议用单引号包裹；如密码本身含引号，按所用环境文件解析器规则处理，或由运行时秘密管理器注入。不要 `source` 不可信文件。避免将展开后的 `docker compose config` 输出分享给别人，其中可能包含密钥。
 
 ## 3. 一个组件一个 Compose：共 5 个容器
 
@@ -134,7 +137,7 @@ docker compose --env-file .env -f docker-compose.core.yaml up -d --build --wait
 curl -fsS http://127.0.0.1:8420/health
 ```
 
-使用支持 `up --wait` 的 Compose v2。PostgreSQL 就绪后才启动 Core。Compose 将 Embedding 三个变量传入 Core，并只读挂载数据库 TOML 和 Gateway YAML；配置文件不存在会报错，不会创建同名目录。数据库不映射宿主端口；所有 HTTP 端口仅映射 `127.0.0.1`。首次构建需要下载依赖。
+使用支持 `up --wait` 的 Compose v2。PostgreSQL 就绪后才启动 Core。五份 Compose 显式将同一个 `POSTGRES_PASSWORD` 传给各自容器；仅有 `.env` 插值不会自动传入容器。Compose 还将 Embedding 三个变量传入 Core，并只读挂载数据库 TOML 和 Gateway YAML；配置文件不存在会报错，不会创建同名目录。数据库不映射宿主端口；所有 HTTP 端口仅映射 `127.0.0.1`。首次构建需要下载依赖。
 
 健康检查只证明相应服务的健康端点响应，不证明外部 Embedding / LLM 或完整模块联调成功。逐个查看状态 / 日志：
 
@@ -144,7 +147,7 @@ docker compose --env-file .env -f docker-compose.core.yaml ps
 docker compose --env-file .env -f docker-compose.core.yaml logs --tail=100
 ```
 
-修改 `.env` 后重新创建对应容器，不能只 `restart`：
+修改 `.env` 后重新创建对应应用容器，不能只 `restart`。已有数据库卷的角色密码不会因修改 `POSTGRES_PASSWORD` 自动改变；轮换密码须先按 PostgreSQL 管理流程更改角色密码，再同步环境并重建应用容器：
 
 ```sh
 docker compose --env-file .env -f docker-compose.core.yaml up -d --force-recreate --wait
@@ -189,9 +192,9 @@ unset GATEWAY_KEY
    ```sh
    cd MemoryCore
    npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
-   npm run oauth -- login --account owner --vault-id agentmemory
-   npm run oauth -- status --account owner --vault-id agentmemory
-   npm run oauth -- models --account owner --vault-id agentmemory
+   node --env-file=../.env --import tsx scripts/oauth/cli.ts login --account owner --vault-id agentmemory
+   node --env-file=../.env --import tsx scripts/oauth/cli.ts status --account owner --vault-id agentmemory
+   node --env-file=../.env --import tsx scripts/oauth/cli.ts models --account owner --vault-id agentmemory
    ```
 
 3. 所有者在浏览器确认 AgentMemory 自己的授权；使用 `models` 实际返回的模型 slug 设置 YAML `llm.provider: oauth` 及其 `oauth` 块，随后显式启用提取。
@@ -293,8 +296,8 @@ chmod 600 .env config/metadata-instances.json
 `id` 与 Core instance 一致；`api_key` 是服务间 Gateway Key，不是 Embedding Key。未启用 Proxy 时可省略 `proxy_endpoint`。
 
 ```sh
-# 在 MemoryPanel 下，终端一：
-npm run dev
+# 在 MemoryPanel 下，终端一（根 .env 加载数据库密码，模块 .env 加载 Panel 设置）：
+node --env-file=../.env --env-file=.env --import tsx --watch src/index.ts
 # 在另一终端，从仓库根目录开始：
 cd MemoryPanel/web
 npm install
@@ -335,7 +338,7 @@ chmod 600 config.yaml
 - 按实际部署配置 / 关闭 Knowledge、遥测、账单和私有扩展，不保留不适用的示例端点。
 
 ```sh
-npm run start:config
+node --env-file=../.env --import tsx/esm src/index.ts --config config.yaml
 curl -fsS http://127.0.0.1:8096/health
 ```
 

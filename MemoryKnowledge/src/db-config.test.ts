@@ -123,8 +123,11 @@ describe("shared database configuration", () => {
   });
 });
 
-it("wires TOML into the actual module configuration", () => {
-  write(`[postgres]\nurl = '${shared}'`);
+it.each([false, true])("wires TOML into actual module configuration (env reference: %s)", (reference) => {
+  write(reference
+    ? `[postgres]\nurl = "postgresql://user@localhost:5432/agentmemory"\npassword_env = "SYNTHETIC_DB_PASSWORD"`
+    : `[postgres]\nurl = '${shared}'`);
+  vi.stubEnv("SYNTHETIC_DB_PASSWORD", "p@ss");
   vi.stubEnv("AGENTMEMORY_DB_CONFIG", join(cwd, "config/db.toml"));
   try {
     for (const key of [

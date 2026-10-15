@@ -26,7 +26,10 @@ Panel retains its signing/encryption secret and instance registry as configurati
 
 Database settings now live in root **`config/db.toml`**, shared by Core, Knowledge,
 Panel and Proxy. Copy `config/db.example.toml` to that path, replace the example
-URL, and protect the file with `chmod 600`. Per-module URL overrides and separate
+host, and set the raw `POSTGRES_PASSWORD` once in root `.env` (copy `.env.example`).
+TOML contains only a password-free URL and `password_env = "POSTGRES_PASSWORD"`;
+the loader encodes the password automatically. Protect both files with `chmod 600`.
+Per-module URL overrides and separate
 Core metadata URL are supported. See [configuration rules](config/README.md) for
 exact path resolution, compatibility, conflict handling and container mounts.
 The private file is gitignored; no actual credentials are included in this branch.
@@ -71,7 +74,7 @@ The example uses low worker concurrency. Start with a small workload: vector sea
 Stop all writers and take restorable backups of the SQLite databases, storage root and PG target. Do not migrate a live source. Run from `MemoryCore` with Node 22.18+ (Node 24 is used in CI):
 
 ```sh
-npm run migrate:postgres -- \
+node --env-file=../.env --import tsx scripts/migrate-sqlite-to-postgres/cli.ts \
   --instance default \
   --memory-sqlite /backup/vectors.db \
   --metadata-sqlite /backup/metadata.db \

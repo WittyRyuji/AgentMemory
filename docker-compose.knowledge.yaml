@@ -7,6 +7,7 @@ services:
     ports:
     - 127.0.0.1:8421:8421
     environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a PostgreSQL password outside Git}
       AGENTMEMORY_DB_CONFIG: /app/config/db.toml
       KNOWLEDGE_SERVICE_KEY: ${KNOWLEDGE_SERVICE_KEY:?Set a Knowledge service key outside Git}
       KNOWLEDGE_PUBLIC_BASE_URL: ${KNOWLEDGE_PUBLIC_BASE_URL:-http://127.0.0.1:8421/v3}

@@ -7,6 +7,7 @@ services:
     ports:
     - 127.0.0.1:8096:8096
     environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a PostgreSQL password outside Git}
       AGENTMEMORY_DB_CONFIG: /app/config/db.toml
       PROXY_STORAGE_BACKEND: postgres
       TDAI_PROXY_ADMIN_API_KEY: ${TDAI_PROXY_ADMIN_API_KEY:?Set a separate Proxy admin key outside Git}

@@ -14,6 +14,7 @@ for (const component of ['postgres', 'core', 'panel', 'proxy', 'knowledge']) {
   assert.equal(doc.networks.shared.external, true);
   assert.equal(doc.networks.shared.name, '${AGENTMEMORY_NETWORK:-agentmemory}');
   const service = doc.services[component];
+  assert.equal(service.environment.POSTGRES_PASSWORD, "${POSTGRES_PASSWORD:?Set a PostgreSQL password outside Git}");
   assert(!service.depends_on && !service.profiles && !service.container_name);
   assert.deepEqual(service.networks.shared.aliases, [component]);
   for (const port of service.ports ?? []) assert(port.startsWith('127.0.0.1:'));
